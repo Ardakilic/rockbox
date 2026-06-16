@@ -285,26 +285,23 @@ jobs:
       # ═══════════════════════════════════════════════════════════════════
       # WINDOWS (x64 + arm64)
       # ═══════════════════════════════════════════════════════════════════
-      # Qt 6.8.0 via aqtinstall. Core5Compat (qt5compat) and SvgWidgets
-      # (qtsvg) are NOT in the base package — must explicitly install them.
-      # LinguistTools is included in the base qt6 package on Windows.
+      # Qt 6.8.0 via aqtinstall. Core5Compat (qt5compat) is NOT in the
+      # base package — must explicitly install it with -m qt5compat.
+      # Svg, SvgWidgets, and LinguistTools are in the base aqt package.
       #
       # Windows ARM64: the win64_msvc2022_arm64 architecture requires the
       # x64 desktop Qt as a base (provides moc/rcc/uic host tools). We
-      # install x64 first, then arm64 on top into the same directory.
-      # If arm64 packages are unavailable, the x64 fallback produces x64
-      # binaries via the x64 MSVC cross-compiler on the ARM64 runner.
+      # install x64 Qt first with modules, then arm64 add-on on top.
       - name: Install Qt6 via aqt (Windows)
         if: runner.os == 'Windows'
         run: |
           pip install aqtinstall
           if ("${{ matrix.arch }}" -eq "arm64") {
-            # Install x64 Qt first (base with host tools), then arm64 add-on
-            aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt -m qt5compat -m qtsvg
+            aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt -m qt5compat
             aqt install-qt windows desktop 6.8.0 win64_msvc2022_arm64 -O $env:RUNNER_TEMP\Qt
             echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\msvc2022_arm64" >> $env:GITHUB_ENV
           } else {
-            aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt -m qt5compat -m qtsvg
+            aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt -m qt5compat
             echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\msvc2022_64" >> $env:GITHUB_ENV
           }
 
