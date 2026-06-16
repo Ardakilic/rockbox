@@ -272,6 +272,10 @@ The application version is `1.5.2`. `Info.plist`, `dmgbuild.cfg`, and `RockboxUt
 | Qt 6.8 on Windows goes EOL / security patches needed | Low | Qt is a build-time dependency, not runtime. Version can be bumped in the workflow YAML. If ARM64 Windows Qt binaries are dropped entirely, the matrix entry can be removed or switched to x64 emulation. |
 | Linux apt Qt6 version mismatch between x64 and arm64 | Low | Both architectures pull from the same Ubuntu 24.04 repository. CMake's `find_package` is flexible; minor version differences are handled by Qt's backward compatibility. |
 | Release deletion fails because `latest-builds` release doesn't exist (first run) | Low | `gh release delete` with `|| true` fallback. The `create` step always runs. |
+| Ninja duplicate rule error (`dmgbuild.stamp`) from two `deploy_qt()` calls on macOS | High | **Workaround:** Bypass cmake deploy entirely on macOS. Build only `--target RockboxUtility`, then manually run `macdeployqt` + `dmgbuild`. This avoids the ninja conflict in the generated build file. See workflow comments for details. |
+| `linuxdeploy-x86_64.AppImage` exec format error on ARM64 | High | **Workaround:** Pre-download the aarch64 linuxdeploy binaries before cmake configure, placed under the x86_64 filename. The `download.cmake` script checks `if(EXISTS)` before downloading — pre-placed files are accepted. |
+| `Qt6Core5Compat` not found in aqt base install | Medium | **Fix:** Add `-m qt5compat -m qtsvg -m qttools` to aqt install-qt command. Core5Compat, SvgWidgets, and LinguistTools are add-on modules not in the default package. |
+| `qt_base` not found for `win64_msvc2022_arm64` architecture | Medium | **Workaround:** Install x64 Qt first (`win64_msvc2022_64` with all modules), then arm64 on top (`win64_msvc2022_arm64` without modules). ARM64 Qt for Windows requires the x64 base install for host tools (moc, rcc). If this still fails, the `continue-on-error` flag on the ARM64 matrix entry handles it gracefully. |
 
 ## Open Questions
 
