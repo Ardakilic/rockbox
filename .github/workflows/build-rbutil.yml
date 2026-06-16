@@ -1,0 +1,309 @@
+name: Build Rockbox Utility
+
+# ──────────────────────────────────────────────────────────────────────────
+# ARCHITECTURAL DECISIONS (preserved for future maintainers)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# 1. NATIVE BUILDS, NOT DOCKER CROSS-COMPILATION
+#    Docker images exist (stateoftheartio/qt6:6.8-macos-aqt for osxcross,
+#    stateoftheartio/qt6:6.8-mingw-aqt for Windows) but cross-compiled
+#    macOS binaries have known limitations:
+#      - macdeployqt is crippled (no hdiutil, no proper DMG)
+#      - codesign is unavailable
+#      - IOKit USB device access may fail at runtime
+#      - Carbon framework headers may be missing from osxcross SDK
+#    Native builds produce correct, fully-functional binaries.
+#    Trade-off: 5 separate runner types instead of 1 Docker host.
+#
+# 2. macos-14, NOT macos-15
+#    Carbon framework was DEPRECATED in macOS 10.8 (2012) and REMOVED
+#    from the macOS 15 SDK. Two source files require Carbon:
+#      utils/rbutilqt/base/ttscarbon.cpp → #include <Carbon/Carbon.h>
+#      utils/rbutilqt/base/utils.cpp     → #include <Carbon/Carbon.h>
+#    macos-13 = Intel x64, has Carbon → NO (need arm64)
+#    macos-14 = Apple Silicon arm64, has Carbon → YES
+#    macos-15 = Apple Silicon arm64, Carbon REMOVED → build fails
+#    Binaries compiled against macOS 14 SDK run on macOS 15+.
+#
+# 3. PLATFORM-NATIVE QT INSTALLATION
+#    Linux:   apt install qt6-* → Ubuntu 24.04 repos, both x64 and arm64
+#    macOS:   brew install qt@6 → Homebrew, keg-only at /opt/homebrew/opt/qt@6
+#    Windows: aqtinstall (pip)  → Official Qt binaries at pinned v6.8.0
+#    REJECTED: jurplel/install-qt-action (opaque version mapping)
+#
+# 4. Qt VERSION STRATEGY
+#    Linux:   Whatever Ubuntu 24.04 ships (~6.4-6.7)
+#    macOS:   Whatever Homebrew ships (~6.8)
+#    Windows: PINNED to 6.8.0 — last version with win64_msvc2022_arm64
+#    Trade-off: Different Qt versions across platforms. Acceptable.
+#
+# 5. WINDOWS ARM64 RUNNER (windows-11-arm)
+#    GitHub issue #14100 (May 2026): ARM64 images now fully GitHub-managed.
+#    Image exists with VS 2022 Enterprise, CMake 4.3.3, MSVC ARM64 tools.
+#    BUT: label absent from standard-runner README — may be paid-tier only.
+#    continue-on-error: true as safety net.
+#    TO VERIFY: If it provisions on free tier, remove continue-on-error.
+#
+# 6. RELEASE UPSERT STRATEGY
+#    Delete old release + create new release (not update-in-place).
+#    GitHub Releases API doesn't support atomic asset replacement.
+#    gh release delete latest-builds --yes --cleanup-tag
+#    gh release create latest-builds --title "Latest ..." --prerelease
+#    Fixed tag 'latest-builds' = permanent stable download URL.
+#
+# 7. NINJA GENERATOR
+#    Consistently available, faster than Make, simpler than MSBuild.
+#
+# 8. ARTIFACT NAMING
+#    Workflow artifacts: RockboxUtility-{label}-{sha}.{ext} (per-commit)
+#    Release assets:       RockboxUtility-{label}.{ext} (stable names)
+#
+# 9. PATH-BASED TRIGGER FILTERING
+#    Only triggers on utils/**, tools/**, lib/**, or this file.
+#    Firmware-only changes don't trigger CI.
+#
+# 10. FULL GIT CLONE
+#     gitversion.cmake needs git rev-parse and git diff.
+#     Shallow clone produces "N/A" version string.
+# ──────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'utils/**'
+      - 'tools/**'
+      - 'lib/**'
+      - '.github/workflows/build-rbutil.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'utils/**'
+      - 'tools/**'
+      - 'lib/**'
+      - '.github/workflows/build-rbutil.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            ext: AppImage
+            label: linux-x64
+
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            ext: AppImage
+            label: linux-arm64
+
+          - os: macos-14
+            arch: arm64
+            ext: dmg
+            label: macos-arm64
+
+          - os: windows-2025
+            arch: x64
+            ext: zip
+            label: windows-x64
+
+          - os: windows-11-arm
+            arch: arm64
+            ext: zip
+            label: windows-arm64
+            continue-on-error: true
+
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error || false }}
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ═══════════════════════════════════════════════════════════════════
+      # LINUX (x64 + arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 and build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            qt6-base-dev \
+            qt6-tools-dev \
+            qt6-svg-dev \
+            qt6-multimedia-dev \
+            qt6-5compat-dev \
+            libqt6svgwidgets6 \
+            libgl1-mesa-dev \
+            libusb-1.0-0-dev \
+            ninja-build
+
+      - name: CMake Configure (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+
+      - name: CMake Build (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build build --parallel
+
+      - name: CMake Deploy (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build build --target deploy
+
+      - name: Upload Artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
+          path: build/RockboxUtility.AppImage
+          if-no-files-found: error
+
+      # ═══════════════════════════════════════════════════════════════════
+      # macOS (arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 and Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install qt@6 ninja
+          echo "QT_PATH=/opt/homebrew/opt/qt@6" >> $GITHUB_ENV
+
+      - name: CMake Configure (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S utils -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" \
+            -G Ninja
+
+      - name: CMake Build (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --build build --parallel
+
+      - name: CMake Deploy (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --build build --target deploy
+
+      - name: Verify DMG (macOS)
+        if: runner.os == 'macOS'
+        run: ls -la build/RockboxUtility.dmg
+
+      - name: Upload Artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
+          path: build/RockboxUtility.dmg
+          if-no-files-found: error
+
+      # ═══════════════════════════════════════════════════════════════════
+      # WINDOWS (x64 + arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 via aqt (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pip install aqtinstall
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            aqt install-qt windows desktop 6.8.0 win64_msvc2022_arm64 -O $env:RUNNER_TEMP\Qt
+            echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\msvc2022_arm64" >> $env:GITHUB_ENV
+          } else {
+            aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt
+            echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\msvc2022_64" >> $env:GITHUB_ENV
+          }
+
+      - name: CMake Configure (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cmake -S utils -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -G Ninja
+
+      - name: CMake Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --parallel
+
+      - name: CMake Deploy (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --target deploy
+
+      - name: Upload Artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
+          path: build/RockboxUtility*.zip
+          if-no-files-found: error
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # RELEASE UPSERT — "Latest Rockbox Utility Builds"
+  # ═══════════════════════════════════════════════════════════════════════
+  release:
+    needs: build
+    if: success()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: RockboxUtility-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Rename to stable filenames
+        run: |
+          for f in release-artifacts/*; do
+            [ -f "$f" ] || continue
+            newname=$(echo "$f" | sed -E 's/-[0-9a-f]{7,40}//')
+            if [ "$f" != "$newname" ]; then
+              mv "$f" "$newname"
+              echo "Renamed: $(basename "$f") → $(basename "$newname")"
+            fi
+          done
+          echo "Release assets:"
+          ls -la release-artifacts/
+
+      - name: Delete existing release
+        run: gh release delete latest-builds --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create release with binaries
+        run: |
+          gh release create latest-builds \
+            --title "Latest Rockbox Utility Builds" \
+            --notes "$(cat <<'RELEASENOTES'
+          Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+
+          **Build Date:** $(date -u +"%Y-%m-%d %H:%M UTC")
+          **Branch:** ${{ github.ref_name }}
+
+          | Platform | Architecture | Download |
+          |----------|-------------|----------|
+          | Linux | x64 | [RockboxUtility-linux-x64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-x64.AppImage) |
+          | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-arm64.AppImage) |
+          | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-macos-arm64.dmg) |
+          | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-x64.zip) |
+          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-arm64.zip) |
+
+          > These are automated CI builds from every push. They are not signed or notarized.
+          > For official releases, see the [Releases page](https://github.com/${{ github.repository }}/releases).
+          RELEASENOTES
+          )" \
+            --prerelease \
+            release-artifacts/*
+        env:
+          GH_TOKEN: ${{ github.token }}
