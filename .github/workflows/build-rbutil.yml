@@ -291,39 +291,37 @@ jobs:
       # ═══════════════════════════════════════════════════════════════════
       # WINDOWS (x64 + arm64)
       # ═══════════════════════════════════════════════════════════════════
-      # Qt 6.8.0 via aqtinstall. Core5Compat (qt5compat) is NOT in the
-      # base package — must explicitly install it with -m qt5compat.
-      # Svg, SvgWidgets, and LinguistTools are all in the base aqt package.
+      # Qt 6.8.0 via aqtinstall — MinGW variant (not MSVC).
       #
-      # Compiler: Must force MSVC (cl.exe). On windows-2025, MinGW gcc is
-      # also pre-installed and Ninja finds it first. Explicit -DCMAKE_C_COMPILER
-      # and -DCMAKE_CXX_COMPILER flags force MSVC.
+      # WHY MinGW: The upstream C source in utils/imxtools/sbtools/sb.h uses
+      # __attribute__((packed)) which is a GCC extension. MSVC does not
+      # support this syntax and fails with C2059/C2143 errors. MinGW gcc
+      # (pre-installed on all Windows runners) compiles it correctly.
+      # MinGW Qt is installed with the win64_mingw architecture.
       #
-      # Windows ARM64: The win64_msvc2022_arm64 packages DO NOT EXIST for
-      # Qt 6.8.0 (only available in 6.11+). We install x64 Qt and produce
-      # x64 binaries. These run on ARM64 Windows via built-in x64 emulation.
+      # Windows ARM64: ARM64 Qt packages don't exist for 6.8.0. We install
+      # x64 MinGW Qt and produce x64 binaries. These run on ARM64 Windows
+      # via built-in x64 emulation (transparent, good performance).
       - name: Install Qt6 via aqt (Windows)
         if: runner.os == 'Windows'
         run: |
           pip install aqtinstall
-          # Both x64 and arm64 runners use x64 Qt (arm64 packages don't exist for 6.8)
-          aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt -m qt5compat
-          echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\msvc2022_64" >> $env:GITHUB_ENV
+          aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
+          echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
 
-      # vcvarsall.bat sets up the MSVC compiler environment (cl.exe, link.exe,
-      # INCLUDE, LIB). Without it, Ninja picks up MinGW gcc which produces
-      # linker errors with MSVC Qt libraries. We run configure, build, and
-      # deploy in a single cmd step because the MSVC environment from
-      # vcvarsall.bat only persists within the same shell session.
-      # On ARM64, vcvarsall.bat amd64 gives x64 cross-compiler → x64 binaries.
-      - name: CMake Configure, Build, Deploy (Windows)
+      - name: CMake Configure (Windows)
         if: runner.os == 'Windows'
-        shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" amd64
-          cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=%QT_PATH% -G Ninja
-          cmake --build build --parallel
-          cmake --build build --target deploy
+          cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" -G Ninja
+
+      - name: CMake Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --parallel
+
+      - name: CMake Deploy (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --target deploy
 
       - name: Upload Artifact (Windows)
         if: runner.os == 'Windows'
