@@ -129,7 +129,7 @@ jobs:
     steps:
       # ── Checkout ──────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -180,7 +180,7 @@ jobs:
 
       - name: Upload Artifact (Linux)
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
           path: build/RockboxUtility.AppImage
@@ -283,7 +283,7 @@ jobs:
 
       - name: Upload Artifact (macOS)
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
           path: build/RockboxUtility.dmg
@@ -307,16 +307,17 @@ jobs:
       # "undefined reference to __imp___argc" because NO object provides
       # this symbol anymore.
       #
-      # Fix: After cmake configure, patch build.ninja to remove the full
-      # path to libQt6EntryPoint.a from all link rules. MinGW-w64 does NOT
-      # require WinMain — the CRT always calls main(). Qt6EntryPoint was
-      # only needed to bridge WinMain→main on MSVC. Without it, main()
-      # works correctly and __imp___argc is never referenced.
+      # Fix 1 (ninja patch): After cmake configure, patch build.ninja to
+      # remove the full path to libQt6EntryPoint.a from all link rules.
+      # This object contains the only reference to __imp___argc.
       #
-      # We also build only --target RockboxUtility (not the default "all")
-      # to skip test executables. The tests crash during cmake test
-      # discovery because they need test data files from the source tree
-      # that aren't available in the build directory.
+      # Fix 2 (WinMain shim): With -mwindows, MinGW-w64's CRT includes
+      # crtexewin.o which calls WinMain (not main). Qt6EntryPoint used
+      # to provide WinMain→main bridge. We compile a tiny WinMain shim
+      # that delegates to main(), and inject it via linker flags.
+      #
+      # We build only --target RockboxUtility (not "all") to skip test
+      # executables that crash during cmake test discovery.
       #
       # Windows ARM64: ARM64 Qt packages don't exist for 6.8.0. We install
       # x64 MinGW Qt and produce x64 binaries. These run on ARM64 Windows
@@ -328,11 +329,28 @@ jobs:
           aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
           echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
 
+      - name: Create WinMain shim (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          @"
+          #include <windows.h>
+          extern int __argc;
+          extern char **__argv;
+          int main(int argc, char **argv);
+          int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
+              return main(__argc, __argv);
+          }
+          "@ > $env:RUNNER_TEMP\winmain.c
+          gcc -c $env:RUNNER_TEMP\winmain.c -o $env:RUNNER_TEMP\winmain.o
+
       - name: CMake Configure (Windows)
         if: runner.os == 'Windows'
         run: |
+          $shim = "$env:RUNNER_TEMP\winmain.o" -replace '\\', '/'
           cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" -G Ninja
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -DCMAKE_EXE_LINKER_FLAGS="$shim" `
+            -G Ninja
 
       - name: Remove Qt6EntryPoint from build.ninja (Windows)
         if: runner.os == 'Windows'
@@ -353,7 +371,7 @@ jobs:
 
       - name: Upload Artifact (Windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
           path: build/RockboxUtility*.zip
@@ -369,7 +387,7 @@ jobs:
 
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           pattern: RockboxUtility-*
           path: release-artifacts
