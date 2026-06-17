@@ -299,9 +299,15 @@ jobs:
       # (pre-installed on all Windows runners) compiles it correctly.
       # MinGW Qt is installed with the win64_mingw architecture.
       #
-      # Qt6EntryPoint / __imp___argc: Qt 6's WinMain entry point conflicts
-      # with newer MinGW-w64 (14.x+) runtime. --allow-multiple-definition
-      # suppresses the duplicate symbol error.
+      # Qt6EntryPoint / __imp___argc: Qt 6.8.0's MinGW package was built
+      # against an older MinGW-w64 CRT that exported __imp___argc (via
+      # __declspec(dllimport)). On newer MinGW-w64 (14.x+, 15.x+) this
+      # symbol is not auto-imported — the CRT defines __argc directly.
+      # The linker fails with "undefined reference to __imp___argc".
+      #
+      # Fix: compile a tiny shim that provides the missing symbols, then
+      # inject it into CMAKE_EXE_LINKER_FLAGS so it's linked into every
+      # executable. This is a link-time patch; zero source modifications.
       #
       # PATH: $env:QT_PATH\bin must be in PATH so Qt6 DLLs are found when
       # CMake runs test executables for test discovery (0xc0000135 otherwise).
@@ -316,12 +322,19 @@ jobs:
           aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
           echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
 
+      - name: Create __argc/__argv shim (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo 'int __argc = 0; char **__argv = 0; char **__environ = 0; int _dowildcard = 0;' > $env:RUNNER_TEMP\shim.c
+          gcc -c $env:RUNNER_TEMP\shim.c -o $env:RUNNER_TEMP\shim.o
+
       - name: CMake Configure (Windows)
         if: runner.os == 'Windows'
         run: |
+          $shim = "$env:RUNNER_TEMP\shim.o" -replace '\\', '/'
           cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
-            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" `
+            -DCMAKE_EXE_LINKER_FLAGS="$shim" `
             -G Ninja
 
       - name: CMake Build (Windows)
