@@ -262,6 +262,12 @@ jobs:
           # Run macdeployqt to bundle Qt frameworks into the .app
           ${{ env.QT_PATH }}/bin/macdeployqt build/rbutilqt/RockboxUtility.app -verbose=1
 
+          # Ad-hoc codesign: macOS arm64 REQUIRES code signatures. Without this,
+          # the binary is killed with SIGKILL (Code Signature Invalid).
+          # The '-' identity means ad-hoc (self-signed) — no Apple Developer
+          # account needed. --deep signs all bundled Qt frameworks too.
+          codesign --force --deep --sign - build/rbutilqt/RockboxUtility.app
+
           # Create DMG using dmgbuild (same config as deploy.cmake)
           python3 -m venv /tmp/dmgvenv
           /tmp/dmgvenv/bin/pip install -q dmgbuild
