@@ -299,6 +299,13 @@ jobs:
       # (pre-installed on all Windows runners) compiles it correctly.
       # MinGW Qt is installed with the win64_mingw architecture.
       #
+      # Qt6EntryPoint / __imp___argc: Qt 6's WinMain entry point conflicts
+      # with newer MinGW-w64 (14.x+) runtime. --allow-multiple-definition
+      # suppresses the duplicate symbol error.
+      #
+      # PATH: $env:QT_PATH\bin must be in PATH so Qt6 DLLs are found when
+      # CMake runs test executables for test discovery (0xc0000135 otherwise).
+      #
       # Windows ARM64: ARM64 Qt packages don't exist for 6.8.0. We install
       # x64 MinGW Qt and produce x64 binaries. These run on ARM64 Windows
       # via built-in x64 emulation (transparent, good performance).
@@ -313,15 +320,21 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" -G Ninja
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--allow-multiple-definition" `
+            -G Ninja
 
       - name: CMake Build (Windows)
         if: runner.os == 'Windows'
-        run: cmake --build build --parallel
+        run: |
+          $env:PATH = "$env:QT_PATH\bin;$env:PATH"
+          cmake --build build --parallel
 
       - name: CMake Deploy (Windows)
         if: runner.os == 'Windows'
-        run: cmake --build build --target deploy
+        run: |
+          $env:PATH = "$env:QT_PATH\bin;$env:PATH"
+          cmake --build build --target deploy
 
       - name: Upload Artifact (Windows)
         if: runner.os == 'Windows'
