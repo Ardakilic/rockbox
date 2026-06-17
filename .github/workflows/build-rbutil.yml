@@ -304,24 +304,20 @@ jobs:
           aqt install-qt windows desktop 6.8.0 win64_msvc2022_64 -O $env:RUNNER_TEMP\Qt -m qt5compat
           echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\msvc2022_64" >> $env:GITHUB_ENV
 
-      - name: CMake Configure (Windows)
+      # vcvarsall.bat sets up the MSVC compiler environment (cl.exe, link.exe,
+      # INCLUDE, LIB). Without it, Ninja picks up MinGW gcc which produces
+      # linker errors with MSVC Qt libraries. We run configure, build, and
+      # deploy in a single cmd step because the MSVC environment from
+      # vcvarsall.bat only persists within the same shell session.
+      # On ARM64, vcvarsall.bat amd64 gives x64 cross-compiler → x64 binaries.
+      - name: CMake Configure, Build, Deploy (Windows)
         if: runner.os == 'Windows'
+        shell: cmd
         run: |
-          cmake -S utils -B build `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
-            -DCMAKE_C_COMPILER=cl `
-            -DCMAKE_CXX_COMPILER=cl `
-            -G Ninja
-            -G Ninja
-
-      - name: CMake Build (Windows)
-        if: runner.os == 'Windows'
-        run: cmake --build build --parallel
-
-      - name: CMake Deploy (Windows)
-        if: runner.os == 'Windows'
-        run: cmake --build build --target deploy
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" amd64
+          cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=%QT_PATH% -G Ninja
+          cmake --build build --parallel
+          cmake --build build --target deploy
 
       - name: Upload Artifact (Windows)
         if: runner.os == 'Windows'
