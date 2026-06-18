@@ -29,20 +29,20 @@ name: Build Rockbox Utility
 #    Linux:   apt install qt6-* → Ubuntu 24.04 repos, both x64 and arm64
 #    macOS:   brew install qt@6 → Homebrew, keg-only at /opt/homebrew/opt/qt@6
 #    Windows: aqtinstall (pip)  → Official Qt binaries at pinned v6.8.0
+#             win64_mingw variant — NOT win64_msvc2022_64 (see #11)
 #    REJECTED: jurplel/install-qt-action (opaque version mapping)
 #
 # 4. Qt VERSION STRATEGY
 #    Linux:   Whatever Ubuntu 24.04 ships (~6.4-6.7)
 #    macOS:   Whatever Homebrew ships (~6.8)
-#    Windows: PINNED to 6.8.0 — last version with win64_msvc2022_arm64
+#    Windows: PINNED to 6.8.0 via aqtinstall
 #    Trade-off: Different Qt versions across platforms. Acceptable.
 #
 # 5. WINDOWS ARM64 RUNNER (windows-11-arm)
-#    GitHub issue #14100 (May 2026): ARM64 images now fully GitHub-managed.
-#    Image exists with VS 2022 Enterprise, CMake 4.3.3, MSVC ARM64 tools.
-#    BUT: label absent from standard-runner README — may be paid-tier only.
-#    continue-on-error: true as safety net.
-#    TO VERIFY: If it provisions on free tier, remove continue-on-error.
+#    ARM64 Qt 6.8.0 packages do not exist (win64_msvc2022_arm64 was added
+#    in 6.11+). We install x64 MinGW Qt and produce x64 binaries. These
+#    run on ARM64 Windows via built-in x64 emulation — transparent and
+#    with good performance. continue-on-error: true as safety net.
 #
 # 6. RELEASE UPSERT STRATEGY
 #    Delete old release + create new release (not update-in-place).
@@ -65,6 +65,53 @@ name: Build Rockbox Utility
 # 10. FULL GIT CLONE
 #     gitversion.cmake needs git rev-parse and git diff.
 #     Shallow clone produces "N/A" version string.
+#
+# 11. WINDOWS COMPILER: MinGW, NOT MSVC
+#     utils/imxtools/sbtools/sb.h uses __attribute__((packed)), a GCC
+#     extension. MSVC fails with C2059/C2143 on these structs. MinGW gcc
+#     is pre-installed on both windows-2025 and windows-11-arm, handles
+#     this correctly. Qt is installed as win64_mingw (not msvc2022_64).
+#     Ninja auto-detects MinGW gcc from PATH.
+#
+# 12. WINDOWS: Qt6EntryPoint / WinMain WORKAROUND
+#     Two linked issues when building with MinGW + Qt 6.8.0 + -mwindows:
+#     a) Qt6EntryPoint.a references __imp___argc, but MinGW-w64 14.x/15.x
+#        CRT only provides __argc (no __imp___ prefix). The linker fails
+#        with "undefined reference to __imp___argc".
+#        FIX: post-configure ninja patch removes libQt6EntryPoint.a from
+#        all link rules.
+#     b) -mwindows sets the PE subsystem to GUI, making crtexewin.o call
+#        WinMain instead of main. Without Qt6EntryPoint, WinMain is
+#        undefined.
+#        FIX: compile a tiny WinMain shim → winmain.o, injected into
+#        CMAKE_EXE_LINKER_FLAGS. Delegates to main().
+#     Both are link-time patches; zero source modifications.
+#
+# 13. macOS: DMGBUILD.STAMP DUPLICATE NINJA RULE
+#     deploy.cmake is called by BOTH rbutilqt/CMakeLists.txt and
+#     themeeditor/CMakeLists.txt. Both produce the same ninja rule:
+#       build dmgbuild.stamp: CUSTOM_COMMAND ...
+#     Ninja rejects "multiple rules generate dmgbuild.stamp" at parse
+#     time. FIX: after cmake configure, Python script patches build.ninja
+#     to keep only the first dmgbuild.stamp rule. Deployment is then
+#     done manually with macdeployqt + dmgbuild (bypass cmake target).
+#
+# 14. macOS: AD-HOC CODESIGNING
+#     macOS arm64 (Apple Silicon) REQUIRES all executables to have a
+#     valid code signature. Unsigned binaries are killed with SIGKILL
+#     (Code Signature Invalid) by the kernel on macOS 15+ / 26+.
+#     APPL uses 'codesign --force --deep --sign -' (ad-hoc signing).
+#     The '-' identity is self-signed — no Apple Developer account
+#     needed. --deep signs bundled Qt frameworks too. This is still
+#     unsigned for Gatekeeper purposes but satisfies mandatory SIP.
+#
+# 15. LINUX ARM64: LINUXDEPLOY ARCHITECTURE WORKAROUND
+#     deploy.cmake hardcodes x86_64 linuxdeploy URLs and checks
+#     if(EXISTS) before downloading. We pre-download aarch64
+#     linuxdeploy/linuxdeploy-plugin-qt binaries under the x86_64
+#     filename. CMake's download step skips them because the file
+#     already exists. The aarch64 binary runs correctly on the
+#     ARM64 runner.
 # ──────────────────────────────────────────────────────────────────────────
 
 on:
@@ -77,11 +124,6 @@ on:
       - '.github/workflows/build-rbutil.yml'
   pull_request:
     branches: [main, master]
-    paths:
-      - 'utils/**'
-      - 'tools/**'
-      - 'lib/**'
-      - '.github/workflows/build-rbutil.yml'
   workflow_dispatch:
 
 permissions:
@@ -129,9 +171,9 @@ jobs:
     steps:
       # ── Checkout ──────────────────────────────────────────────────────
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       # ═══════════════════════════════════════════════════════════════════
       # LINUX (x64 + arm64)
@@ -386,6 +428,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
