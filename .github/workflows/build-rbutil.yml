@@ -1,0 +1,492 @@
+name: Build Rockbox Utility
+
+# ──────────────────────────────────────────────────────────────────────────
+# ARCHITECTURAL DECISIONS (preserved for future maintainers)
+# ──────────────────────────────────────────────────────────────────────────
+#
+# 1. NATIVE BUILDS, NOT DOCKER CROSS-COMPILATION
+#    Docker images exist (stateoftheartio/qt6:6.8-macos-aqt for osxcross,
+#    stateoftheartio/qt6:6.8-mingw-aqt for Windows) but cross-compiled
+#    macOS binaries have known limitations:
+#      - macdeployqt is crippled (no hdiutil, no proper DMG)
+#      - codesign is unavailable
+#      - IOKit USB device access may fail at runtime
+#      - Carbon framework headers may be missing from osxcross SDK
+#    Native builds produce correct, fully-functional binaries.
+#    Trade-off: 5 separate runner types instead of 1 Docker host.
+#
+# 2. macos-14, NOT macos-15
+#    Carbon framework was DEPRECATED in macOS 10.8 (2012) and REMOVED
+#    from the macOS 15 SDK. Two source files require Carbon:
+#      utils/rbutilqt/base/ttscarbon.cpp → #include <Carbon/Carbon.h>
+#      utils/rbutilqt/base/utils.cpp     → #include <Carbon/Carbon.h>
+#    macos-13 = Intel x64, has Carbon → NO (need arm64)
+#    macos-14 = Apple Silicon arm64, has Carbon → YES
+#    macos-15 = Apple Silicon arm64, Carbon REMOVED → build fails
+#    Binaries compiled against macOS 14 SDK run on macOS 15+.
+#
+# 3. PLATFORM-NATIVE QT INSTALLATION
+#    Linux:   apt install qt6-* → Ubuntu 24.04 repos, both x64 and arm64
+#    macOS:   brew install qt@6 → Homebrew, keg-only at /opt/homebrew/opt/qt@6
+#    Windows: aqtinstall (pip)  → Official Qt binaries at pinned v6.8.0
+#             win64_mingw variant — NOT win64_msvc2022_64 (see #11)
+#    REJECTED: jurplel/install-qt-action (opaque version mapping)
+#
+# 4. Qt VERSION STRATEGY
+#    Linux:   Whatever Ubuntu 24.04 ships (~6.4-6.7)
+#    macOS:   Whatever Homebrew ships (~6.8)
+#    Windows: PINNED to 6.8.0 via aqtinstall
+#    Trade-off: Different Qt versions across platforms. Acceptable.
+#
+# 5. WINDOWS ARM64 RUNNER (windows-11-arm)
+#    ARM64 Qt 6.8.0 packages do not exist (win64_msvc2022_arm64 was added
+#    in 6.11+). We install x64 MinGW Qt and produce x64 binaries. These
+#    run on ARM64 Windows via built-in x64 emulation — transparent and
+#    with good performance. continue-on-error: true as safety net.
+#
+# 6. RELEASE UPSERT STRATEGY
+#    Delete old release + create new release (not update-in-place).
+#    GitHub Releases API doesn't support atomic asset replacement.
+#    gh release delete latest-builds --yes --cleanup-tag
+#    gh release create latest-builds --title "Latest ..." --prerelease
+#    Fixed tag 'latest-builds' = permanent stable download URL.
+#
+# 7. NINJA GENERATOR
+#    Consistently available, faster than Make, simpler than MSBuild.
+#
+# 8. ARTIFACT NAMING
+#    Workflow artifacts: RockboxUtility-{label}-{sha}.{ext} (per-commit)
+#    Release assets:       RockboxUtility-{label}.{ext} (stable names)
+#
+# 9. PATH-BASED TRIGGER FILTERING
+#    Only triggers on utils/**, tools/**, lib/**, or this file.
+#    Firmware-only changes don't trigger CI.
+#
+# 10. FULL GIT CLONE
+#     gitversion.cmake needs git rev-parse and git diff.
+#     Shallow clone produces "N/A" version string.
+#
+# 11. WINDOWS COMPILER: MinGW, NOT MSVC
+#     utils/imxtools/sbtools/sb.h uses __attribute__((packed)), a GCC
+#     extension. MSVC fails with C2059/C2143 on these structs. MinGW gcc
+#     is pre-installed on both windows-2025 and windows-11-arm, handles
+#     this correctly. Qt is installed as win64_mingw (not msvc2022_64).
+#     Ninja auto-detects MinGW gcc from PATH.
+#
+# 12. WINDOWS: Qt6EntryPoint / WinMain WORKAROUND
+#     Two linked issues when building with MinGW + Qt 6.8.0 + -mwindows:
+#     a) Qt6EntryPoint.a references __imp___argc, but MinGW-w64 14.x/15.x
+#        CRT only provides __argc (no __imp___ prefix). The linker fails
+#        with "undefined reference to __imp___argc".
+#        FIX: post-configure ninja patch removes libQt6EntryPoint.a from
+#        all link rules.
+#     b) -mwindows sets the PE subsystem to GUI, making crtexewin.o call
+#        WinMain instead of main. Without Qt6EntryPoint, WinMain is
+#        undefined.
+#        FIX: compile a tiny WinMain shim → winmain.o, injected into
+#        CMAKE_EXE_LINKER_FLAGS. Delegates to main().
+#     Both are link-time patches; zero source modifications.
+#
+# 13. macOS: DMGBUILD.STAMP DUPLICATE NINJA RULE
+#     deploy.cmake is called by BOTH rbutilqt/CMakeLists.txt and
+#     themeeditor/CMakeLists.txt. Both produce the same ninja rule:
+#       build dmgbuild.stamp: CUSTOM_COMMAND ...
+#     Ninja rejects "multiple rules generate dmgbuild.stamp" at parse
+#     time. FIX: after cmake configure, Python script patches build.ninja
+#     to keep only the first dmgbuild.stamp rule. Deployment is then
+#     done manually with macdeployqt + dmgbuild (bypass cmake target).
+#
+# 14. macOS: AD-HOC CODESIGNING
+#     macOS arm64 (Apple Silicon) REQUIRES all executables to have a
+#     valid code signature. Unsigned binaries are killed with SIGKILL
+#     (Code Signature Invalid) by the kernel on macOS 15+ / 26+.
+#     APPL uses 'codesign --force --deep --sign -' (ad-hoc signing).
+#     The '-' identity is self-signed — no Apple Developer account
+#     needed. --deep signs bundled Qt frameworks too. This is still
+#     unsigned for Gatekeeper purposes but satisfies mandatory SIP.
+#
+# 15. LINUX ARM64: LINUXDEPLOY ARCHITECTURE WORKAROUND
+#     deploy.cmake hardcodes x86_64 linuxdeploy URLs and checks
+#     if(EXISTS) before downloading. We pre-download aarch64
+#     linuxdeploy/linuxdeploy-plugin-qt binaries under the x86_64
+#     filename. CMake's download step skips them because the file
+#     already exists. The aarch64 binary runs correctly on the
+#     ARM64 runner.
+# ──────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'utils/rbutilqt/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x64
+            ext: AppImage
+            label: linux-x64
+
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            ext: AppImage
+            label: linux-arm64
+
+          - os: macos-14
+            arch: arm64
+            ext: dmg
+            label: macos-arm64
+
+          - os: windows-2025
+            arch: x64
+            ext: zip
+            label: windows-x64
+
+          - os: windows-11-arm
+            arch: arm64
+            ext: zip
+            label: windows-arm64
+            continue-on-error: true
+
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error || false }}
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      # ═══════════════════════════════════════════════════════════════════
+      # LINUX (x64 + arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 and build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            qt6-base-dev \
+            qt6-tools-dev \
+            qt6-svg-dev \
+            qt6-multimedia-dev \
+            qt6-5compat-dev \
+            libqt6svgwidgets6 \
+            libgl1-mesa-dev \
+            libusb-1.0-0-dev \
+            ninja-build
+
+      # On ARM64, pre-download aarch64 linuxdeploy binaries before cmake
+      # configure. The deploy.cmake hardcodes x86_64 URLs and checks
+      # if(EXISTS) before downloading. We place the correct-arch binaries
+      # under the x86_64 filename so cmake skips the download step.
+      - name: Pre-download linuxdeploy (Linux ARM64)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          mkdir -p build
+          curl -fsSL -o build/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
+          curl -fsSL -o build/linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-aarch64.AppImage
+          chmod +x build/linuxdeploy-x86_64.AppImage build/linuxdeploy-plugin-qt-x86_64.AppImage
+          echo "Pre-downloaded aarch64 linuxdeploy binaries"
+
+      - name: CMake Configure (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+
+      - name: CMake Build (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build build --parallel
+
+      - name: CMake Deploy (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build build --target deploy
+
+      - name: Rename artifact to platform-labeled name (Linux)
+        if: runner.os == 'Linux'
+        run: mv build/RockboxUtility.AppImage "build/RockboxUtility-${{ matrix.label }}.AppImage"
+
+      - name: Upload Artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
+          path: "build/RockboxUtility-${{ matrix.label }}.AppImage"
+          if-no-files-found: error
+
+      # ═══════════════════════════════════════════════════════════════════
+      # macOS (arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 and Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew trust aws/tap azure/bicep
+          brew install qt@6 ninja
+          echo "QT_PATH=/opt/homebrew/opt/qt@6" >> $GITHUB_ENV
+
+      - name: CMake Configure (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S utils -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" \
+            -G Ninja
+
+      # Pre-create the dmgbuild Python virtualenv and stamp file to avoid
+      # a ninja duplicate-output error. The deploy.cmake module is called
+      # by BOTH rbutilqt/CMakeLists.txt and themeeditor/CMakeLists.txt,
+      # and both try to produce ${CMAKE_BINARY_DIR}/dmgbuild.stamp — causing
+      # "multiple rules generate dmgbuild.stamp" at ninja PARSE time.
+      #
+      # Fix: After cmake configure, patch build.ninja to remove all but
+      # the first build rule that produces dmgbuild.stamp. Then deploy
+      # manually with macdeployqt + dmgbuild (bypass cmake deploy target).
+      - name: Patch duplicate dmgbuild.stamp in build.ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python3 << 'PYEOF'
+          with open('build/build.ninja', 'r') as f:
+              content = f.read()
+          lines = content.split('\n')
+          result = []
+          dmgbuild_first_kept = False
+          skip_block = False
+
+          for line in lines:
+              is_dmgbuild_build = ('dmgbuild.stamp' in line
+                                   and line.lstrip().startswith('build '))
+              if is_dmgbuild_build and dmgbuild_first_kept:
+                  skip_block = True
+                  continue
+              if is_dmgbuild_build and not dmgbuild_first_kept:
+                  dmgbuild_first_kept = True
+                  result.append(line)
+                  continue
+              if skip_block:
+                  if line and line[0] not in (' ', '\t'):
+                      skip_block = False
+                      result.append(line)
+                  continue
+              result.append(line)
+
+          with open('build/build.ninja', 'w') as f:
+              f.write('\n'.join(result))
+          print('Patched build.ninja: removed duplicate dmgbuild.stamp rules')
+          PYEOF
+
+      - name: CMake Build (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --build build --target RockboxUtility
+
+      - name: Deploy manually (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Copy helper executables into app bundle (same as deploy.cmake does)
+          mkdir -p build/rbutilqt/RockboxUtility.app/Contents/bin
+          cp build/ipodpatcher/ipodpatcher \
+             build/rbutilqt/RockboxUtility.app/Contents/bin/ || true
+          cp build/sansapatcher/sansapatcher \
+             build/rbutilqt/RockboxUtility.app/Contents/bin/ || true
+
+          # Run macdeployqt to bundle Qt frameworks into the .app
+          ${{ env.QT_PATH }}/bin/macdeployqt build/rbutilqt/RockboxUtility.app -verbose=1
+
+          # Ad-hoc codesign: macOS arm64 REQUIRES code signatures. Without this,
+          # the binary is killed with SIGKILL (Code Signature Invalid).
+          # The '-' identity means ad-hoc (self-signed) — no Apple Developer
+          # account needed. --deep signs all bundled Qt frameworks too.
+          codesign --force --deep --sign - build/rbutilqt/RockboxUtility.app
+
+          # Create DMG using dmgbuild (same config as deploy.cmake)
+          python3 -m venv /tmp/dmgvenv
+          /tmp/dmgvenv/bin/pip install -q dmgbuild
+          /tmp/dmgvenv/bin/python3 -m dmgbuild \
+            -s utils/rbutilqt/dmgbuild.cfg \
+            -Dappbundle=build/rbutilqt/RockboxUtility.app \
+            RockboxUtility build/RockboxUtility.dmg
+
+      - name: Verify DMG (macOS)
+        if: runner.os == 'macOS'
+        run: ls -la build/RockboxUtility.dmg
+
+      - name: Rename artifact to platform-labeled name (macOS)
+        if: runner.os == 'macOS'
+        run: mv build/RockboxUtility.dmg "build/RockboxUtility-${{ matrix.label }}.dmg"
+
+      - name: Upload Artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
+          path: "build/RockboxUtility-${{ matrix.label }}.dmg"
+          if-no-files-found: error
+
+      # ═══════════════════════════════════════════════════════════════════
+      # WINDOWS (x64 + arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      # Qt 6.8.0 via aqtinstall — MinGW variant (not MSVC).
+      #
+      # WHY MinGW: The upstream C source in utils/imxtools/sbtools/sb.h uses
+      # __attribute__((packed)) which is a GCC extension. MSVC does not
+      # support this syntax and fails with C2059/C2143 errors. MinGW gcc
+      # (pre-installed on all Windows runners) compiles it correctly.
+      # MinGW Qt is installed with the win64_mingw architecture.
+      #
+      # Qt6EntryPoint / __imp___argc: Qt 6.8.0's MinGW package was built
+      # against an older MinGW-w64 CRT that exported __imp___argc (a DLL
+      # import pointer). The runner's MinGW-w64 14.x/15.x CRT defines
+      # __argc directly without __imp___argc. The linker fails with
+      # "undefined reference to __imp___argc" because NO object provides
+      # this symbol anymore.
+      #
+      # Fix 1 (ninja patch): After cmake configure, patch build.ninja to
+      # remove the full path to libQt6EntryPoint.a from all link rules.
+      # This object contains the only reference to __imp___argc.
+      #
+      # Fix 2 (WinMain shim): With -mwindows, MinGW-w64's CRT includes
+      # crtexewin.o which calls WinMain (not main). Qt6EntryPoint used
+      # to provide WinMain→main bridge. We compile a tiny WinMain shim
+      # that delegates to main(), and inject it via linker flags.
+      #
+      # We build only --target RockboxUtility (not "all") to skip test
+      # executables that crash during cmake test discovery.
+      #
+      # Windows ARM64: ARM64 Qt packages don't exist for 6.8.0. We install
+      # x64 MinGW Qt and produce x64 binaries. These run on ARM64 Windows
+      # via built-in x64 emulation (transparent, good performance).
+      - name: Install Qt6 via aqt (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
+          echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
+
+      - name: Create WinMain shim (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          @"
+          #include <windows.h>
+          extern int __argc;
+          extern char **__argv;
+          int main(int argc, char **argv);
+          int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
+              return main(__argc, __argv);
+          }
+          "@ > $env:RUNNER_TEMP\winmain.c
+          gcc -c $env:RUNNER_TEMP\winmain.c -o $env:RUNNER_TEMP\winmain.o
+
+      - name: CMake Configure (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $shim = "$env:RUNNER_TEMP\winmain.o" -replace '\\', '/'
+          cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -DCMAKE_EXE_LINKER_FLAGS="$shim" `
+            -G Ninja
+
+      - name: Remove Qt6EntryPoint from build.ninja (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -c "import re; c=open('build/build.ninja').read(); open('build/build.ninja','w').write(re.sub(r'\S*libQt6EntryPoint\.a','',c))"
+
+      - name: CMake Build RockboxUtility (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:QT_PATH\bin;$env:PATH"
+          cmake --build build --target RockboxUtility
+
+      - name: CMake Deploy (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:QT_PATH\bin;$env:PATH"
+          cmake --build build --target deploy
+
+      - name: Rename artifact to platform-labeled name (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $zip = Get-ChildItem build/RockboxUtility*.zip | Select-Object -First 1
+          Move-Item $zip.FullName "build/RockboxUtility-${{ matrix.label }}.zip" -Force
+
+      - name: Upload Artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: RockboxUtility-${{ matrix.label }}-${{ github.sha }}
+          path: "build/RockboxUtility-${{ matrix.label }}.zip"
+          if-no-files-found: error
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # RELEASE UPSERT — "Latest Rockbox Utility Builds"
+  # ═══════════════════════════════════════════════════════════════════════
+  release:
+    needs: build
+    if: success()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: RockboxUtility-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          echo "Release assets:"
+          ls -la release-artifacts/
+          # Expect exactly these filenames (windows-arm64 may be absent if its build failed):
+          #   RockboxUtility-linux-x64.AppImage
+          #   RockboxUtility-linux-arm64.AppImage
+          #   RockboxUtility-macos-arm64.dmg
+          #   RockboxUtility-windows-x64.zip
+          #   RockboxUtility-windows-arm64.zip
+
+      - name: Get build date
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
+
+      - name: Delete existing release
+        run: gh release delete latest-builds --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create release with binaries
+        run: |
+          gh release create latest-builds \
+            --title "Latest Rockbox Utility Builds" \
+            --notes "Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+
+          **Build Date:** ${{ steps.date.outputs.date }}
+
+          | Platform | Architecture | Download |
+          |----------|-------------|----------|
+          | Linux | x64 | [RockboxUtility-linux-x64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-x64.AppImage) |
+          | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-arm64.AppImage) |
+          | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-macos-arm64.dmg) |
+          | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-x64.zip) |
+          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-arm64.zip) |
+
+          > These are automated CI builds from every push. They are not signed or notarized.
+          > For official releases, see the [RockboxUtility wiki](https://www.rockbox.org/wiki/RockboxUtility#Download)." \
+            release-artifacts/*
+        env:
+          GH_TOKEN: ${{ github.token }}
