@@ -116,14 +116,12 @@ name: Build Rockbox Utility
 
 on:
   push:
-    branches: [main, master]
+    branches: [master]
     paths:
       - 'utils/**'
       - 'tools/**'
       - 'lib/**'
       - '.github/workflows/build-rbutil.yml'
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -453,6 +451,10 @@ jobs:
           echo "Release assets:"
           ls -la release-artifacts/
 
+      - name: Get build date
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
+
       - name: Delete existing release
         run: gh release delete latest-builds --yes --cleanup-tag || true
         env:
@@ -462,11 +464,9 @@ jobs:
         run: |
           gh release create latest-builds \
             --title "Latest Rockbox Utility Builds" \
-            --notes "$(cat <<'RELEASENOTES'
-          Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            --notes "Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
 
-          **Build Date:** $(date -u +"%Y-%m-%d %H:%M UTC")
-          **Branch:** ${{ github.ref_name }}
+          **Build Date:** ${{ steps.date.outputs.date }}
 
           | Platform | Architecture | Download |
           |----------|-------------|----------|
@@ -477,9 +477,7 @@ jobs:
           | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-arm64.zip) |
 
           > These are automated CI builds from every push. They are not signed or notarized.
-          > For official releases, see the [Releases page](https://github.com/${{ github.repository }}/releases).
-          RELEASENOTES
-          )" \
+          > For official releases, see the [RockboxUtility wiki](https://www.rockbox.org/wiki/RockboxUtility#Download)." \
             --prerelease \
             release-artifacts/*
         env:
