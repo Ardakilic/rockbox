@@ -30,7 +30,7 @@ jobs:
             ext: AppImage
             label: linux-arm64
 
-          - os: macos-27
+          - os: macos-26
             arch: arm64
             ext: dmg
             label: macos-arm64
