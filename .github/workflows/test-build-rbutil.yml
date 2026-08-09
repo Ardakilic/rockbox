@@ -1,0 +1,353 @@
+name: Test Build Rockbox Utility
+
+# Test workflow to validate the Carbon stub approach on macOS 15+ SDKs.
+# Runs in parallel with the main workflow (manual trigger only).
+# No release job — just compile + upload artifacts for inspection.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            arch: x64
+            ext: AppImage
+            label: linux-x64
+
+          - os: ubuntu-26.04-arm
+            arch: arm64
+            ext: AppImage
+            label: linux-arm64
+
+          - os: macos-27
+            arch: arm64
+            ext: dmg
+            label: macos-arm64
+
+          - os: windows-2025
+            arch: x64
+            ext: zip
+            label: windows-x64
+
+          - os: windows-11-arm
+            arch: arm64
+            ext: zip
+            label: windows-arm64
+            continue-on-error: true
+
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.continue-on-error || false }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # ═══════════════════════════════════════════════════════════════════
+      # LINUX (x64 + arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 and build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            qt6-base-dev \
+            qt6-tools-dev \
+            qt6-svg-dev \
+            qt6-multimedia-dev \
+            qt6-5compat-dev \
+            libqt6svgwidgets6 \
+            libgl1-mesa-dev \
+            libusb-1.0-0-dev \
+            ninja-build
+
+      - name: Pre-download linuxdeploy (Linux ARM64)
+        if: runner.os == 'Linux' && runner.arch == 'ARM64'
+        run: |
+          mkdir -p build
+          curl -fsSL -o build/linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
+          curl -fsSL -o build/linuxdeploy-plugin-qt-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-aarch64.AppImage
+          chmod +x build/linuxdeploy-x86_64.AppImage build/linuxdeploy-plugin-qt-x86_64.AppImage
+
+      - name: CMake Configure (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+
+      - name: CMake Build (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build build --parallel
+
+      - name: CMake Deploy (Linux)
+        if: runner.os == 'Linux'
+        run: cmake --build build --target deploy
+
+      - name: Rename artifact (Linux)
+        if: runner.os == 'Linux'
+        run: mv build/RockboxUtility.AppImage "build/RockboxUtility-${{ matrix.label }}.AppImage"
+
+      - name: Upload Artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: TestBuild-${{ matrix.label }}-${{ github.sha }}
+          path: "build/RockboxUtility-${{ matrix.label }}.AppImage"
+          if-no-files-found: error
+
+      # ═══════════════════════════════════════════════════════════════════
+      # macOS (arm64) — macos-27 with Carbon stub
+      #
+      # Carbon headers were removed from the macOS 15 SDK. Two source files
+      # (ttscarbon.cpp, ttscarbon.h) unconditionally #include <Carbon/Carbon.h>.
+      # CMakeLists.txt unconditionally compiles ttscarbon.cpp under if(APPLE).
+      #
+      # FIX: Before cmake configure, replace ttscarbon.{h,cpp} with stubs that
+      # have the same class/method signatures but empty implementations. The
+      # "carbon" TTS backend becomes non-functional (start() returns false);
+      # ttsqt (already compiled when Qt::TextToSpeech + Qt::Multimedia are
+      # available — which Homebrew qt@6 provides) is the working TTS backend.
+      #
+      # Also remove Carbon.framework from build.ninja link rules as a safety
+      # net (mirrors the existing Qt6EntryPoint removal pattern).
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 and Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install qt@6 ninja
+          echo "QT_PATH=/opt/homebrew/opt/qt@6" >> $GITHUB_ENV
+
+      - name: Stub out Carbon-dependent TTS (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cat > utils/rbutilqt/base/ttscarbon.h << 'STUB_EOF'
+          #ifndef TTSCARBON_H
+          #define TTSCARBON_H
+
+          #include <QtCore>
+          #include "ttsbase.h"
+
+          // ponytail: stub — Carbon removed from macOS 15+ SDK
+          typedef void* SpeechChannel;
+          typedef int CFStringBuiltInEncodings;
+
+          class TTSCarbon : public TTSBase
+          {
+              Q_OBJECT
+              enum ConfigValuesCarbon
+              {
+                  ConfigVoice,
+                  ConfigSpeed,
+                  ConfigPitch
+              };
+              public:
+                  TTSCarbon(QObject *parent = NULL);
+                  TTSStatus voice(const QString& text, const QString& wavfile, QString* errStr);
+                  bool start(QString *errStr);
+                  bool stop();
+                  QString voiceVendor(void) { return QString(); }
+                  bool configOk();
+                  void generateSettings();
+                  void saveSettings();
+                  Capabilities capabilities();
+
+              private:
+                  SpeechChannel m_channel;
+                  CFStringBuiltInEncodings m_voiceScript;
+          };
+
+          #endif // TTSCARBON_H
+          STUB_EOF
+
+          cat > utils/rbutilqt/base/ttscarbon.cpp << 'STUB_EOF'
+          #include <QtCore>
+          #include "ttsbase.h"
+          #include "ttscarbon.h"
+
+          TTSCarbon::TTSCarbon(QObject* parent) : TTSBase(parent)
+          {
+              m_channel = NULL;
+              m_voiceScript = 0;
+          }
+
+          TTSStatus TTSCarbon::voice(const QString& text, const QString& wavfile, QString* errStr)
+          {
+              *errStr = "Carbon TTS not available on this macOS version";
+              return FatalError;
+          }
+
+          bool TTSCarbon::start(QString *errStr)
+          {
+              *errStr = "Carbon TTS not available";
+              return false;
+          }
+
+          bool TTSCarbon::stop() { return true; }
+
+          bool TTSCarbon::configOk() { return false; }
+
+          void TTSCarbon::generateSettings() {}
+
+          void TTSCarbon::saveSettings() {}
+
+          TTSBase::Capabilities TTSCarbon::capabilities() { return TTSBase::None; }
+          STUB_EOF
+
+          echo "Stubbed ttscarbon.{h,cpp} — Carbon dependency removed"
+
+      - name: CMake Configure (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S utils -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" \
+            -G Ninja
+
+      - name: Remove Carbon framework from build.ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python3 -c "import re; c=open('build/build.ninja').read(); open('build/build.ninja','w').write(re.sub(r'\S*Carbon\.framework\S*','',c))"
+
+      - name: Patch duplicate dmgbuild.stamp in build.ninja (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          python3 << 'PYEOF'
+          with open('build/build.ninja', 'r') as f:
+              content = f.read()
+          lines = content.split('\n')
+          result = []
+          dmgbuild_first_kept = False
+          skip_block = False
+
+          for line in lines:
+              is_dmgbuild_build = ('dmgbuild.stamp' in line
+                                   and line.lstrip().startswith('build '))
+              if is_dmgbuild_build and dmgbuild_first_kept:
+                  skip_block = True
+                  continue
+              if is_dmgbuild_build and not dmgbuild_first_kept:
+                  dmgbuild_first_kept = True
+                  result.append(line)
+                  continue
+              if skip_block:
+                  if line and line[0] not in (' ', '\t'):
+                      skip_block = False
+                      result.append(line)
+                  continue
+              result.append(line)
+
+          with open('build/build.ninja', 'w') as f:
+              f.write('\n'.join(result))
+          print('Patched build.ninja: removed duplicate dmgbuild.stamp rules')
+          PYEOF
+
+      - name: CMake Build (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --build build --target RockboxUtility
+
+      - name: Deploy manually (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p build/rbutilqt/RockboxUtility.app/Contents/bin
+          cp build/ipodpatcher/ipodpatcher \
+             build/rbutilqt/RockboxUtility.app/Contents/bin/ || true
+          cp build/sansapatcher/sansapatcher \
+             build/rbutilqt/RockboxUtility.app/Contents/bin/ || true
+
+          ${{ env.QT_PATH }}/bin/macdeployqt build/rbutilqt/RockboxUtility.app -verbose=1
+          codesign --force --deep --sign - build/rbutilqt/RockboxUtility.app
+
+          python3 -m venv /tmp/dmgvenv
+          /tmp/dmgvenv/bin/pip install -q dmgbuild
+          /tmp/dmgvenv/bin/python3 -m dmgbuild \
+            -s utils/rbutilqt/dmgbuild.cfg \
+            -Dappbundle=build/rbutilqt/RockboxUtility.app \
+            RockboxUtility build/RockboxUtility.dmg
+
+      - name: Rename artifact (macOS)
+        if: runner.os == 'macOS'
+        run: mv build/RockboxUtility.dmg "build/RockboxUtility-${{ matrix.label }}.dmg"
+
+      - name: Upload Artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: TestBuild-${{ matrix.label }}-${{ github.sha }}
+          path: "build/RockboxUtility-${{ matrix.label }}.dmg"
+          if-no-files-found: error
+
+      # ═══════════════════════════════════════════════════════════════════
+      # WINDOWS (x64 + arm64)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: Install Qt6 via aqt (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pip install aqtinstall
+          aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
+          echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
+
+      - name: Create WinMain shim (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          @"
+          #include <windows.h>
+          extern int __argc;
+          extern char **__argv;
+          int main(int argc, char **argv);
+          int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
+              return main(__argc, __argv);
+          }
+          "@ > $env:RUNNER_TEMP\winmain.c
+          gcc -c $env:RUNNER_TEMP\winmain.c -o $env:RUNNER_TEMP\winmain.o
+
+      - name: CMake Configure (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $shim = "$env:RUNNER_TEMP\winmain.o" -replace '\\', '/'
+          cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -DCMAKE_EXE_LINKER_FLAGS="$shim" `
+            -G Ninja
+
+      - name: Remove Qt6EntryPoint from build.ninja (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -c "import re; c=open('build/build.ninja').read(); open('build/build.ninja','w').write(re.sub(r'\S*libQt6EntryPoint\.a','',c))"
+
+      - name: CMake Build RockboxUtility (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:QT_PATH\bin;$env:PATH"
+          cmake --build build --target RockboxUtility
+
+      - name: CMake Deploy (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $env:PATH = "$env:QT_PATH\bin;$env:PATH"
+          cmake --build build --target deploy
+
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          $zip = Get-ChildItem build/RockboxUtility*.zip | Select-Object -First 1
+          Move-Item $zip.FullName "build/RockboxUtility-${{ matrix.label }}.zip" -Force
+
+      - name: Upload Artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: TestBuild-${{ matrix.label }}-${{ github.sha }}
+          path: "build/RockboxUtility-${{ matrix.label }}.zip"
+          if-no-files-found: error
