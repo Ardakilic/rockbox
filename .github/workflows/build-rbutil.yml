@@ -26,14 +26,14 @@ name: Build Rockbox Utility
 #    Binaries compiled against macOS 14 SDK run on macOS 15+.
 #
 # 3. PLATFORM-NATIVE QT INSTALLATION
-#    Linux:   apt install qt6-* → Ubuntu 24.04 repos, both x64 and arm64
+#    Linux:   apt install qt6-* → Ubuntu 26.04 repos, both x64 and arm64
 #    macOS:   brew install qt@6 → Homebrew, keg-only at /opt/homebrew/opt/qt@6
 #    Windows: aqtinstall (pip)  → Official Qt binaries at pinned v6.8.0
 #             win64_mingw variant — NOT win64_msvc2022_64 (see #11)
 #    REJECTED: jurplel/install-qt-action (opaque version mapping)
 #
 # 4. Qt VERSION STRATEGY
-#    Linux:   Whatever Ubuntu 24.04 ships (~6.4-6.7)
+#    Linux:   Whatever Ubuntu 26.04 ships (~6.10)
 #    macOS:   Whatever Homebrew ships (~6.8)
 #    Windows: PINNED to 6.8.0 via aqtinstall
 #    Trade-off: Different Qt versions across platforms. Acceptable.
@@ -134,12 +134,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             arch: x64
             ext: AppImage
             label: linux-x64
 
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-26.04-arm
             arch: arm64
             ext: AppImage
             label: linux-arm64
