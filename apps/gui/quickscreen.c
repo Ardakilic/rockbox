@@ -66,115 +66,132 @@ void quickscreen_set_skinned(enum screen_type screen, bool skinned)
     qs_skinned[screen] = skinned;
 }
 
-static void quickscreen_fix_viewports(struct quickscreen *qs, enum screen_type screen)
+/* Set up icons viewport */
+static inline void setup_icons(struct viewport *vp_icons, int excess_width,
+                               int top_y, int top_height, int bottom_y)
 {
-    int line_height, width, pad = 0;
-    int left_width = 0, right_width = 0;
-    unsigned char *str;
-    struct viewport *parent = &qs->parent[screen];
-    struct viewport *vps = qs->vps[screen];
-    struct viewport *vp_icons = &qs->vp_icons[screen];
+    vp_icons->x += (vp_icons->width - CENTER_ICONAREA_SIZE - excess_width)/2;
+    vp_icons->y = top_y + top_height;
 
-    /* How many un-cropped lines can be displayed in the UI vp */
-    int nb_lines = viewport_get_nb_lines(parent);
-    if (nb_lines == 0)
-        nb_lines = 1; /* cropped single line */
+    vp_icons->width = CENTER_ICONAREA_SIZE + excess_width;
+    vp_icons->height = bottom_y - vp_icons->y;
 
-    line_height = parent->height/nb_lines;
-
-    /* center the icons VP first */
-    *vp_icons = *parent;
-    vp_icons->width = CENTER_ICONAREA_SIZE; /* absolute smallest allowed */
-    vp_icons->x = parent->x;
-    vp_icons->x += (parent->width - CENTER_ICONAREA_SIZE)/2;
-
-    vps[QUICKSCREEN_BOTTOM] = *parent;
-    vps[QUICKSCREEN_TOP] = *parent;
-    vps[QUICKSCREEN_TOP].y = parent->y;
-
-    /* Top and bottom use 2 lines each, unless there's insufficient space */
-    vps[QUICKSCREEN_TOP].height = vps[QUICKSCREEN_BOTTOM].height
-            = (nb_lines < MIN_LINES ? 1 : 2)*line_height;
-    vps[QUICKSCREEN_BOTTOM].y
-            = parent->y + parent->height - vps[QUICKSCREEN_BOTTOM].height;
-
-    /* enough space vertically, so put a nice margin */
-    if (nb_lines >= MAX_NEEDED_LINES)
+    /* Shrink icons vp by a few pixels if there is room,
+       so the arrows aren't drawn right next to the text */
+    if (vp_icons->width > CENTER_ICONAREA_SIZE*2)
     {
-        vps[QUICKSCREEN_TOP].y += MARGIN;
-        vps[QUICKSCREEN_BOTTOM].y -= MARGIN;
+        vp_icons->x     += CENTER_ICONAREA_SIZE*2/6;
+        vp_icons->width -= CENTER_ICONAREA_SIZE*2/3;
     }
-
-    vp_icons->y = vps[QUICKSCREEN_TOP].y + vps[QUICKSCREEN_TOP].height;
-    vp_icons->height = vps[QUICKSCREEN_BOTTOM].y - vp_icons->y;
-
-    /* adjust the left/right items widths to fit the screen nicely */
-    if (qs->items[QUICKSCREEN_LEFT])
+    if (vp_icons->height > CENTER_ICONAREA_SIZE*2)
     {
-        str = P2STR(ID2P(qs->items[QUICKSCREEN_LEFT]->lang_id));
-        left_width = font_getstringsize(str, NULL, NULL, parent->font);
+        vp_icons->y      += CENTER_ICONAREA_SIZE*2/6;
+        vp_icons->height -= CENTER_ICONAREA_SIZE*2/3;
     }
-    if (qs->items[QUICKSCREEN_RIGHT])
+}
+
+/* Set y-position and height for all text viewports */
+static inline void set_y_axis(struct viewport *left, struct viewport *right,
+                              struct viewport *top, struct viewport *bottom)
+{
+    int parent_height = top->height;
+    /* Displayable lines in UI vp. 1 if no full line can be displayed */
+    int nb_lines = viewport_get_nb_lines(top) ?: 1;
+    int line_height = parent_height/nb_lines;
+
+     /* Top and bottom use 2 lines each, only if there's enough space */
+    top->height = line_height;
+    if (nb_lines >= MIN_LINES)
+        top->height *= 2;
+    bottom->height = top->height;
+    bottom->y += parent_height - bottom->height;
+
+    if (nb_lines >= MAX_NEEDED_LINES) /* more than enough vertical space */
     {
-        str = P2STR(ID2P(qs->items[QUICKSCREEN_RIGHT]->lang_id));
-        right_width = font_getstringsize(str, NULL, NULL, parent->font);
+        top->y += MARGIN;
+        bottom->y -= MARGIN;
     }
-
-    width = MAX(left_width, right_width);
-
-    /* crop text vp, if necessary */
-    if (width*2 + vp_icons->width > parent->width)
+    if (nb_lines >= 2) /* Single line uses parent height and y position  */
     {
-        width = parent->width;
-        if (width > vp_icons->width) /* check if icons fit */
-            width -=  vp_icons->width;
-        else if (width > MARGIN) /* margin without icons */
+        left->height = right->height = 2*line_height;
+        right->y += (parent_height/2) - line_height;
+        left->y = right->y;
+    }
+}
+
+/* Set x-position and width for left and right text viewport.
+   Returns excess horizontal space, after accounting for icon area size. */
+static inline int set_x_axis(struct viewport *left, struct viewport *right,
+                             int width)
+{
+    int pad = 0, excess = 0;
+    int parent_width = left->width;
+
+    if (width*2 + CENTER_ICONAREA_SIZE > parent_width)
+    {
+        /* Shrink left and right text vps */
+        width = parent_width;
+        if (width > CENTER_ICONAREA_SIZE) /* Check if icons fit */
+            width -=  CENTER_ICONAREA_SIZE;
+        else if (width > MARGIN) /* Check if margin without icons fits */
             width -= MARGIN;
 
         if (width >= 2)
             width /= 2;
     }
-    /* space for lager gap between between icons */
     else
     {
-        int excess = parent->width - vp_icons->width - width*2;
+        /* space for padding or for excess gap between icons */
+        excess = parent_width - CENTER_ICONAREA_SIZE - width*2;
         if (excess > MARGIN*4)
         {
             pad = MARGIN;
             excess -= MARGIN*2;
         }
-        vp_icons->x -= excess/2;
-        vp_icons->width += excess;
     }
+    left->x += pad;
+    right->x += parent_width - width - pad;
+    right->width = left->width = width;
 
-    vps[QUICKSCREEN_LEFT] = *parent;
-    vps[QUICKSCREEN_LEFT].x = parent->x + pad;
-    vps[QUICKSCREEN_LEFT].width = width;
+    return excess;
+}
 
-    vps[QUICKSCREEN_RIGHT] = *parent;
-    vps[QUICKSCREEN_RIGHT].x = parent->x + parent->width - width - pad;
-    vps[QUICKSCREEN_RIGHT].width = width;
+/* Set up all QS viewports */
+static void quickscreen_setup_viewports(struct quickscreen *qs,
+                                        enum screen_type screen)
+{
+    struct viewport *parent = &qs->parent[screen];
+    struct viewport *vps = qs->vps[screen];
+    int width = 0, excess;
+    const char *str;
 
-    if (nb_lines >= 2) /* otherwise, use parent height and y position  */
+    qs->vp_icons[screen] = *parent;
+    FOR_QS_ITEMS(i)
+        vps[i] = *parent;
+
+    /* Calculate left and right item's maximum title width */
+    if (qs->items[QUICKSCREEN_LEFT])
     {
-        vps[QUICKSCREEN_LEFT].height = vps[QUICKSCREEN_RIGHT].height
-            = 2*line_height;
-        vps[QUICKSCREEN_LEFT].y = vps[QUICKSCREEN_RIGHT].y
-            = parent->y + (parent->height/2) - line_height;
+        str = P2STR(ID2P(qs->items[QUICKSCREEN_LEFT]->lang_id));
+        width = font_getstringsize(str, NULL, NULL, parent->font);
+    }
+    if (qs->items[QUICKSCREEN_RIGHT])
+    {
+        str = P2STR(ID2P(qs->items[QUICKSCREEN_RIGHT]->lang_id));
+        width = MAX(font_getstringsize(str, NULL, NULL, parent->font), width);
     }
 
-    /* shrink the icons vp by a few pixels if there is room so the arrows
-       aren't drawn right next to the text */
-    if (vp_icons->width > CENTER_ICONAREA_SIZE*2)
-    {
-        vp_icons->width -= CENTER_ICONAREA_SIZE*2/3;
-        vp_icons->x += CENTER_ICONAREA_SIZE*2/6;
-    }
-    if (vp_icons->height > CENTER_ICONAREA_SIZE*2)
-    {
-        vp_icons->height -= CENTER_ICONAREA_SIZE*2/3;
-        vp_icons->y += CENTER_ICONAREA_SIZE*2/6;
-    }
+    /* Set x-position and width for left and right text viewports. Top and bottom
+       use entire width. Check for excess space after accounting for icon area */
+    excess = set_x_axis(&vps[QUICKSCREEN_LEFT], &vps[QUICKSCREEN_RIGHT], width);
+
+    /* Set y-position and height for all text viewports */
+    set_y_axis(&vps[QUICKSCREEN_LEFT], &vps[QUICKSCREEN_RIGHT],
+               &vps[QUICKSCREEN_TOP], &vps[QUICKSCREEN_BOTTOM]);
+
+    /* Configure icons viewport based on text vp dimensions and excess width */
+    setup_icons(&qs->vp_icons[screen], excess, vps[QUICKSCREEN_TOP].y,
+                vps[QUICKSCREEN_TOP].height, vps[QUICKSCREEN_BOTTOM].y);
 
     /* text alignment */
     vps[QUICKSCREEN_LEFT].flags &= ~VP_FLAG_ALIGNMENT_MASK;   /* left-aligned  */
@@ -407,7 +424,7 @@ static inline void setup(struct quickscreen *qs)
         viewportmanager_theme_enable(i, true, &qs->parent[i]);
         if (!qs_skinned[i])
         {
-            quickscreen_fix_viewports(qs, i);
+            quickscreen_setup_viewports(qs, i);
             quickscreen_draw(qs, i);
         }
     }
