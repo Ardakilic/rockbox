@@ -73,10 +73,19 @@ name: Build Rockbox Utility
 #     this correctly. Qt is installed as win64_mingw (not msvc2022_64).
 #     Ninja auto-detects MinGW gcc from PATH.
 #
-# 12. WINDOWS: Qt6EntryPoint / WinMain WORKAROUND — REMOVED
-#     (No file patching — direct build attempt per user request.
-#     Historical note retained: MinGW + Qt 6.8.0 + -mwindows previously
-#     needed a ninja patch removing libQt6EntryPoint.a and a WinMain shim.)
+# 12. WINDOWS: Qt6EntryPoint / WinMain WORKAROUND
+#     Two linked issues when building with MinGW + Qt 6.8.0 + -mwindows:
+#     a) Qt6EntryPoint.a references __imp___argc, but MinGW-w64 14.x/15.x
+#        CRT only provides __argc (no __imp___ prefix). The linker fails
+#        with "undefined reference to __imp___argc".
+#        FIX: post-configure ninja patch removes libQt6EntryPoint.a from
+#        all link rules.
+#     b) -mwindows sets the PE subsystem to GUI, making crtexewin.o call
+#        WinMain instead of main. Without Qt6EntryPoint, WinMain is
+#        undefined.
+#        FIX: compile a tiny WinMain shim → winmain.o, injected into
+#        CMAKE_EXE_LINKER_FLAGS. Delegates to main().
+#     Both are link-time patches; zero source modifications.
 #
 # 13. macOS: DMGBUILD.STAMP DUPLICATE NINJA RULE — REMOVED
 #     (No file patching — direct build attempt via cmake --build --target deploy.)
@@ -250,7 +259,21 @@ jobs:
       # (pre-installed on all Windows runners) compiles it correctly.
       # MinGW Qt is installed with the win64_mingw architecture.
       #
-      # No file patching — direct build attempt (link workarounds removed).
+      # Qt6EntryPoint / __imp___argc: Qt 6.8.0's MinGW package was built
+      # against an older MinGW-w64 CRT that exported __imp___argc (a DLL
+      # import pointer). The runner's MinGW-w64 14.x/15.x CRT defines
+      # __argc directly without __imp___argc. The linker fails with
+      # "undefined reference to __imp___argc" because NO object provides
+      # this symbol anymore.
+      #
+      # Fix 1 (ninja patch): After cmake configure, patch build.ninja to
+      # remove the full path to libQt6EntryPoint.a from all link rules.
+      # This object contains the only reference to __imp___argc.
+      #
+      # Fix 2 (WinMain shim): With -mwindows, MinGW-w64's CRT includes
+      # crtexewin.o which calls WinMain (not main). Qt6EntryPoint used
+      # to provide WinMain→main bridge. We compile a tiny WinMain shim
+      # that delegates to main(), and inject it via linker flags.
       #
       # We build only --target RockboxUtility (not "all") to skip test
       # executables that crash during cmake test discovery.
@@ -265,13 +288,33 @@ jobs:
           aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
           echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
 
-      # No file patching — direct build attempt (WinMain shim / EntryPoint patch removed).
+      - name: Create WinMain shim (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          @"
+          #include <windows.h>
+          extern int __argc;
+          extern char **__argv;
+          int main(int argc, char **argv);
+          int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
+              return main(__argc, __argv);
+          }
+          "@ > $env:RUNNER_TEMP\winmain.c
+          gcc -c $env:RUNNER_TEMP\winmain.c -o $env:RUNNER_TEMP\winmain.o
+
       - name: CMake Configure (Windows)
         if: runner.os == 'Windows'
         run: |
+          $shim = "$env:RUNNER_TEMP\winmain.o" -replace '\\', '/'
           cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -DCMAKE_EXE_LINKER_FLAGS="$shim" `
             -G Ninja
+
+      - name: Remove Qt6EntryPoint from build.ninja (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -c "import re; c=open('build/build.ninja').read(); open('build/build.ninja','w').write(re.sub(r'\S*libQt6EntryPoint\.a','',c))"
 
       - name: CMake Build RockboxUtility (Windows)
         if: runner.os == 'Windows'
