@@ -153,13 +153,39 @@ jobs:
           aqt install-qt windows desktop 6.8.0 win64_mingw -O $env:RUNNER_TEMP\Qt -m qt5compat
           echo "QT_PATH=$env:RUNNER_TEMP\Qt\6.8.0\mingw_64" >> $env:GITHUB_ENV
 
-      # No file patching — direct build attempt (WinMain shim / EntryPoint patch removed).
+      # Windows MinGW + Qt 6.8.0 + -mwindows needs two link-time fixes:
+      # (a) Qt6EntryPoint.a references __imp___argc, missing from MinGW-w64
+      # 14.x/15.x CRT → remove libQt6EntryPoint.a from build.ninja;
+      # (b) -mwindows makes crtexewin.o call WinMain instead of main →
+      # compile a tiny WinMain shim (winmain.o) and inject via
+      # CMAKE_EXE_LINKER_FLAGS. Delegates to main().
+      - name: Create WinMain shim (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          @"
+          #include <windows.h>
+          extern int __argc;
+          extern char **__argv;
+          int main(int argc, char **argv);
+          int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow) {
+              return main(__argc, __argv);
+          }
+          "@ > $env:RUNNER_TEMP\winmain.c
+          gcc -c $env:RUNNER_TEMP\winmain.c -o $env:RUNNER_TEMP\winmain.o
+
       - name: CMake Configure (Windows)
         if: runner.os == 'Windows'
         run: |
+          $shim = "$env:RUNNER_TEMP\winmain.o" -replace '\\', '/'
           cmake -S utils -B build -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" `
+            -DCMAKE_EXE_LINKER_FLAGS="$shim" `
             -G Ninja
+
+      - name: Remove Qt6EntryPoint from build.ninja (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -c "import re; c=open('build/build.ninja').read(); open('build/build.ninja','w').write(re.sub(r'\S*libQt6EntryPoint\.a','',c))"
 
       - name: CMake Build RockboxUtility (Windows)
         if: runner.os == 'Windows'
