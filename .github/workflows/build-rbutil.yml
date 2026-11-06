@@ -15,15 +15,21 @@ name: Build Rockbox Utility
 #    Native builds produce correct, fully-functional binaries.
 #    Trade-off: 5 separate runner types instead of 1 Docker host.
 #
-# 2. macos-14, NOT macos-15
-#    Carbon framework was DEPRECATED in macOS 10.8 (2012) and REMOVED
-#    from the macOS 15 SDK. Two source files require Carbon:
+# 2. macos-15 (arm64, stable)
+#    macos-14 retired Nov 2 2026; we use macos-15 (arm64, stable,
+#    per GitHub notice; macos-latest now floats to macos-26/Xcode 26
+#    which is riskier).
+#    Carbon framework was DEPRECATED in macOS 10.8 (2012) and Carbon
+#    removed from macOS 15 SDK so CI patch below excises Carbon TTS
+#    at build time (no base files modified).
+#    Only ttscarbon.cpp/h need Carbon (not utils.cpp — earlier comment
+#    claiming utils.cpp needed Carbon was stale):
 #      utils/rbutilqt/base/ttscarbon.cpp → #include <Carbon/Carbon.h>
-#      utils/rbutilqt/base/utils.cpp     → #include <Carbon/Carbon.h>
+#      utils/rbutilqt/base/ttscarbon.h   → #include <Carbon/Carbon.h>
 #    macos-13 = Intel x64, has Carbon → NO (need arm64)
-#    macos-14 = Apple Silicon arm64, has Carbon → YES
-#    macos-15 = Apple Silicon arm64, Carbon REMOVED → build fails
-#    Binaries compiled against macOS 14 SDK run on macOS 15+.
+#    macos-14 = Apple Silicon arm64, had Carbon (retired Nov 2 2026)
+#    macos-15 = Apple Silicon arm64, stable, Carbon REMOVED → CI excises it
+#    Binaries run on macOS 15+.
 #
 # 3. PLATFORM-NATIVE QT INSTALLATION
 #    Linux:   apt install qt6-* → Ubuntu 26.04 repos, both x64 and arm64
@@ -133,7 +139,7 @@ jobs:
             ext: AppImage
             label: linux-arm64
 
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             ext: dmg
             label: macos-arm64
@@ -212,6 +218,25 @@ jobs:
           brew trust aws/tap azure/bicep
           brew install qt@6 ninja
           echo "QT_PATH=/opt/homebrew/opt/qt@6" >> $GITHUB_ENV
+
+      - name: Disable Carbon TTS if SDK lacks Carbon headers (macOS 15+)
+        if: runner.os == 'macOS'
+        run: |
+          SDK_PATH="$(xcrun --show-sdk-path)"
+          if [ -f "$SDK_PATH/System/Library/Frameworks/Carbon.framework/Headers/Carbon.h" ]; then
+            echo "Carbon headers present - keeping Carbon TTS"
+          else
+            echo "Carbon headers missing - disabling Carbon TTS (CI-local patch, no base files committed)"
+            sed -i '' '/#include "ttscarbon.h"/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' '/ttsList\["carbon"\]/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' 's/if(ttsName == "carbon")/if(false) \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' 's/tts = new TTSCarbon(parent);/; \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' '/ttscarbon\.cpp/d; /ttscarbon\.h/d' utils/rbutilqt/CMakeLists.txt
+            sed -i '' '/only needed for ttscarbon/d' utils/rbutilqt/CMakeLists.txt
+            sed -i '' 's/\${FRAMEWORK_CARBON} *//g' utils/rbutilqt/CMakeLists.txt
+            echo "Verifying Carbon references removed from build files..."
+            ! grep -rn 'TTSCarbon\|ttscarbon\|FRAMEWORK_CARBON' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt
+          fi
 
       - name: CMake Configure (macOS)
         if: runner.os == 'macOS'
