@@ -181,9 +181,48 @@ jobs:
             libqt6svgwidgets6 \
             libgl1-mesa-dev \
             libusb-1.0-0-dev \
+            librsvg2-bin \
             ninja-build
 
-      # No file patching — direct build attempt (linuxdeploy workaround removed).
+      # CI-local patch below renders the SVG icon to a top-level <Icon>.png
+      # so appimagetool can create .DirIcon (it ignores SVG).
+
+      - name: Patch deploy for appimagetool .DirIcon (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # appimagetool (>= continuous build 368) errors when .DirIcon can't be
+          # derived: it only accepts a top-level <Icon>.png/.xpm, but our
+          # ICONFILEs are SVG (linuxdeploy installs those under usr/share/icons,
+          # not top level) and warns it will refuse to build in future. Render
+          # the SVG to a top-level <Icon>.png (CI-local patch, no base files
+          # committed).
+          # NOTE: heredoc body + closing EOF must sit at the run-block base
+          # indent (10 spaces) — YAML strips the common indent, and bash
+          # requires the terminator at column 0 while python rejects any
+          # base indent. Do not re-indent this block.
+          python3 - <<'EOF'
+          p = 'utils/cmake/deploy.cmake'
+          src = open(p).read()
+          anchor_cfg = 'add_custom_command(\n            OUTPUT ${CMAKE_BINARY_DIR}/${deploy_TARGET}.AppImage'
+          assert src.count(anchor_cfg) == 1, 'AppImage block anchor not unique'
+          cfg_snippet = '        # CI: derive "<Icon>.png" name from the desktop file (configure time).\n        file(STRINGS ${deploy_DESKTOPFILE} _deploy_icon REGEX "^Icon=")\n        string(REGEX REPLACE "^Icon=" "" _deploy_icon "${_deploy_icon}")\n'
+          src = src.replace(anchor_cfg, cfg_snippet + anchor_cfg)
+          anchor_cmd = '            COMMENT "Creating AppImage ${deploy_TARGET}"\n'
+          assert src.count(anchor_cmd) == 1, 'AppImage comment anchor not unique'
+          cmd_snippet = '            # CI: top-level <Icon>.png so appimagetool can create .DirIcon\n            # (it ignores SVG; linuxdeploy only installs those under usr/share).\n            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/AppImage-${deploy_TARGET}\n            COMMAND rsvg-convert -w 256 ${deploy_ICONFILE} -o ${CMAKE_BINARY_DIR}/AppImage-${deploy_TARGET}/${_deploy_icon}.png\n'
+          src = src.replace(anchor_cmd, anchor_cmd + cmd_snippet)
+          open(p, 'w').write(src)
+          print('Patched Linux AppImage deploy for .DirIcon')
+          EOF
+          echo "Verifying .DirIcon patch..."
+          if ! grep -q 'rsvg-convert' utils/cmake/deploy.cmake; then
+            echo ".DirIcon icon patch missing"
+            exit 1
+          fi
+          if ! grep -q '_deploy_icon' utils/cmake/deploy.cmake; then
+            echo ".DirIcon icon-name patch missing"
+            exit 1
+          fi
 
       - name: CMake Configure (Linux)
         if: runner.os == 'Linux'
