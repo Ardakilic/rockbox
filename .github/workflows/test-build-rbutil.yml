@@ -153,7 +153,10 @@ jobs:
           EOF
             sed -i '' 's/\${FRAMEWORK_CARBON} *//g' utils/rbutilqt/CMakeLists.txt
             echo "Verifying Carbon references removed from build files..."
-            ! grep -rn -E 'TTSCarbon|ttscarbon|FRAMEWORK_CARBON|ttsList.*carbon' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt
+            if grep -rn -E 'TTSCarbon|ttscarbon|FRAMEWORK_CARBON|ttsList.*carbon' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt; then
+              echo "Carbon references remain after patching"
+              exit 1
+            fi
           fi
 
       - name: CMake Configure (macOS)
