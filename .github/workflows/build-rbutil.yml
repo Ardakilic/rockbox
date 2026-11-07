@@ -15,15 +15,21 @@ name: Build Rockbox Utility
 #    Native builds produce correct, fully-functional binaries.
 #    Trade-off: 5 separate runner types instead of 1 Docker host.
 #
-# 2. macos-14, NOT macos-15
-#    Carbon framework was DEPRECATED in macOS 10.8 (2012) and REMOVED
-#    from the macOS 15 SDK. Two source files require Carbon:
+# 2. macos-15 (arm64, stable)
+#    macos-14 retired Nov 2 2026; we use macos-15 (arm64, stable,
+#    per GitHub notice; macos-latest now floats to macos-26/Xcode 26
+#    which is riskier).
+#    Carbon framework was DEPRECATED in macOS 10.8 (2012) and Carbon
+#    removed from macOS 15 SDK so CI patch below excises Carbon TTS
+#    at build time (no base files modified).
+#    Only ttscarbon.cpp/h need Carbon (not utils.cpp — earlier comment
+#    claiming utils.cpp needed Carbon was stale):
 #      utils/rbutilqt/base/ttscarbon.cpp → #include <Carbon/Carbon.h>
-#      utils/rbutilqt/base/utils.cpp     → #include <Carbon/Carbon.h>
+#      utils/rbutilqt/base/ttscarbon.h   → #include <Carbon/Carbon.h>
 #    macos-13 = Intel x64, has Carbon → NO (need arm64)
-#    macos-14 = Apple Silicon arm64, has Carbon → YES
-#    macos-15 = Apple Silicon arm64, Carbon REMOVED → build fails
-#    Binaries compiled against macOS 14 SDK run on macOS 15+.
+#    macos-14 = Apple Silicon arm64, had Carbon (retired Nov 2 2026)
+#    macos-15 = Apple Silicon arm64, stable, Carbon REMOVED → CI excises it
+#    Binaries run on macOS 15+.
 #
 # 3. PLATFORM-NATIVE QT INSTALLATION
 #    Linux:   apt install qt6-* → Ubuntu 26.04 repos, both x64 and arm64
@@ -44,12 +50,14 @@ name: Build Rockbox Utility
 #    run on ARM64 Windows via built-in x64 emulation — transparent and
 #    with good performance. continue-on-error: true as safety net.
 #
-# 6. RELEASE UPSERT STRATEGY
-#    Delete old release + create new release (not update-in-place).
-#    GitHub Releases API doesn't support atomic asset replacement.
-#    gh release delete latest-builds --yes --cleanup-tag
-#    gh release create latest-builds --title "Latest ..." --prerelease
-#    Fixed tag 'latest-builds' = permanent stable download URL.
+# 6. PER-COMMIT RELEASE STRATEGY
+#    Every successful build makes a NEW release tagged with the head
+#    commit's short SHA (one release per commit, old builds preserved).
+#    Re-runs delete/recreate the same tag (idempotent).
+#    gh release delete <short-sha> --yes --cleanup-tag
+#    gh release create <short-sha> --title "Rockbox Utility build <sha>"
+#    No fixed 'latest-builds' tag (it overwrote history and old builds
+#    were lost).
 #
 # 7. NINJA GENERATOR
 #    Consistently available, faster than Make, simpler than MSBuild.
@@ -133,7 +141,7 @@ jobs:
             ext: AppImage
             label: linux-arm64
 
-          - os: macos-14
+          - os: macos-15
             arch: arm64
             ext: dmg
             label: macos-arm64
@@ -212,6 +220,75 @@ jobs:
           brew trust aws/tap azure/bicep
           brew install qt@6 ninja
           echo "QT_PATH=/opt/homebrew/opt/qt@6" >> $GITHUB_ENV
+
+      - name: Disable Carbon TTS if SDK lacks Carbon headers (macOS 15+)
+        if: runner.os == 'macOS'
+        run: |
+          SDK_PATH="$(xcrun --show-sdk-path)"
+          if [ -f "$SDK_PATH/System/Library/Frameworks/Carbon.framework/Headers/Carbon.h" ]; then
+            echo "Carbon headers present - keeping Carbon TTS"
+          else
+            echo "Carbon headers missing - disabling Carbon TTS (CI-local patch, no base files committed)"
+            sed -i '' '/#include "ttscarbon.h"/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' '/ttsList.*"carbon".*\]/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' 's/if(ttsName == "carbon")/if(false) \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' 's/tts = new TTSCarbon(parent);/; \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
+            # NOTE: heredoc body + closing EOF must sit at the run-block base
+            # indent (10 spaces) — YAML strips the common indent, and bash
+            # requires the terminator at column 0 while python rejects any
+            # base indent. Do not re-indent this block.
+            python3 - <<'EOF'
+          p = 'utils/rbutilqt/CMakeLists.txt'
+          lines = open(p).read().splitlines(keepends=True)
+          out = []
+          i, removed = 0, False
+          while i < len(lines):
+              if lines[i].strip() == 'if(APPLE)' and not removed:
+                  j, depth = i + 1, 1
+                  while j < len(lines) and depth > 0:
+                      s = lines[j].strip()
+                      if s.startswith('if('):
+                          depth += 1
+                      elif s.startswith('endif('):
+                          depth -= 1
+                      j += 1
+                  if 'ttscarbon' in ''.join(lines[i:j]):
+                      removed = True
+                      i = j
+                      continue
+              out.append(lines[i])
+              i += 1
+          open(p, 'w').write(''.join(out))
+          print('Removed Carbon-only if(APPLE) block' if removed else 'No Carbon if(APPLE) block found, nothing removed')
+          EOF
+            sed -i '' 's/\${FRAMEWORK_CARBON} *//g' utils/rbutilqt/CMakeLists.txt
+            # Fresh installs defaulted to "carbon"; point macOS at the Qt
+            # TextToSpeech engine (AVFoundation, the in-project replacement).
+            # Harmless if Qt speech modules are absent (same fallback as today).
+            sed -i '' '/RbSettings::Tts/ s/"carbon"/"qt"/' utils/rbutilqt/base/rbsettings.cpp
+            # Direct users to pick a working engine when TTS init fails.
+            prompt="Please open the Configuration dialog and select an available TTS engine."
+            for f in utils/rbutilqt/configure.cpp utils/rbutilqt/createvoicewindow.cpp utils/rbutilqt/installtalkwindow.cpp; do
+              sed -i '' "s/You can't use this TTS\./You can't use this TTS. $prompt/" "$f"
+            done
+            sed -i '' "s/Init of TTS engine failed/Init of TTS engine failed. $prompt/" utils/rbutilqt/base/talkgenerator.cpp
+            echo "Verifying Carbon references removed from build files..."
+            if grep -rn -E 'TTSCarbon|ttscarbon|FRAMEWORK_CARBON|ttsList.*carbon' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt; then
+              echo "Carbon references remain after patching"
+              exit 1
+            fi
+            echo "Verifying TTS default migration and configuration prompt..."
+            if ! grep -q -E 'RbSettings::Tts.*"tts".*"qt"' utils/rbutilqt/base/rbsettings.cpp; then
+              echo "macOS TTS default was not migrated from carbon to qt"
+              exit 1
+            fi
+            for f in utils/rbutilqt/configure.cpp utils/rbutilqt/createvoicewindow.cpp utils/rbutilqt/installtalkwindow.cpp utils/rbutilqt/base/talkgenerator.cpp; do
+              if ! grep -q "Please open the Configuration dialog" "$f"; then
+                echo "TTS configuration prompt missing in $f"
+                exit 1
+              fi
+            done
+          fi
 
       - name: CMake Configure (macOS)
         if: runner.os == 'macOS'
@@ -343,7 +420,7 @@ jobs:
           if-no-files-found: error
 
   # ═══════════════════════════════════════════════════════════════════════
-  # RELEASE UPSERT — "Latest Rockbox Utility Builds"
+  # PER-COMMIT RELEASE — one new release per successful head commit
   # ═══════════════════════════════════════════════════════════════════════
   release:
     needs: build
@@ -378,26 +455,31 @@ jobs:
         id: date
         run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
 
-      - name: Delete existing release
-        run: gh release delete latest-builds --yes --cleanup-tag || true
+      - name: Get short SHA (release tag)
+        id: sha
+        run: echo "short=$(echo \"${{ github.sha }}\" | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Delete existing release with same tag (re-run safe)
+        run: gh release delete "${{ steps.sha.outputs.short }}" --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Create release with binaries
         run: |
-          gh release create latest-builds \
-            --title "Latest Rockbox Utility Builds" \
+          TAG="${{ steps.sha.outputs.short }}"
+          gh release create "$TAG" \
+            --title "Rockbox Utility build $TAG" \
             --notes "Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
 
           **Build Date:** ${{ steps.date.outputs.date }}
 
           | Platform | Architecture | Download |
           |----------|-------------|----------|
-          | Linux | x64 | [RockboxUtility-linux-x64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-x64.AppImage) |
-          | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-arm64.AppImage) |
-          | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-macos-arm64.dmg) |
-          | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-x64.zip) |
-          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-arm64.zip) |
+          | Linux | x64 | [RockboxUtility-linux-x64.AppImage](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-linux-x64.AppImage) |
+          | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-linux-arm64.AppImage) |
+          | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-macos-arm64.dmg) |
+          | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-x64.zip) |
+          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-arm64.zip) |
 
           > These are automated CI builds from every push. They are not signed or notarized.
           > For official releases, see the [RockboxUtility wiki](https://www.rockbox.org/wiki/RockboxUtility#Download)." \

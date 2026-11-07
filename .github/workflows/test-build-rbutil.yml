@@ -1,10 +1,11 @@
 name: Test Build Rockbox Utility
 
-# Test workflow — direct build attempts with no file patching.
-# Runs in parallel with the main workflow (manual trigger only).
+# Test workflow — mirrors prod (build-rbutil.yml), manual trigger only.
+# Runs in parallel with the main workflow.
 # No release job — just compile + upload artifacts for inspection.
-# Carbon stub / ninja patch workarounds intentionally removed:
-# macOS tries to compile Carbon headers directly and fails if SDK lacks them.
+# macOS uses macos-15 (stable per GitHub notice, matching prod) with the
+# same CI-local Carbon excise patch as prod (sed at build time, no base
+# files modified); self-adapting no-op when Carbon headers are present.
 
 on:
   workflow_dispatch:
@@ -32,7 +33,7 @@ jobs:
             ext: AppImage
             label: linux-arm64
 
-          - os: macos-26
+          - os: macos-15
             arch: arm64
             ext: dmg
             label: macos-arm64
@@ -101,8 +102,7 @@ jobs:
           path: "build/RockboxUtility-${{ matrix.label }}.AppImage"
           if-no-files-found: error
 
-      # macOS (arm64) — direct build attempt, no Carbon stub / ninja patch.
-      # No file patching — try to compile Carbon headers directly.
+      # macOS (arm64) — CI-local Carbon excise patch below (no base files modified).
       # ═══════════════════════════════════════════════════════════════════
       - name: Install Qt6 and Ninja (macOS)
         if: runner.os == 'macOS'
@@ -110,7 +110,75 @@ jobs:
           brew install qt@6 ninja
           echo "QT_PATH=/opt/homebrew/opt/qt@6" >> $GITHUB_ENV
 
-      # No file patching — direct build attempt (Carbon stub removed).
+      # CI-local sed patch, no base files modified (mirrors prod workflow).
+      - name: Disable Carbon TTS if SDK lacks Carbon headers (macOS 15+)
+        if: runner.os == 'macOS'
+        run: |
+          SDK_PATH="$(xcrun --show-sdk-path)"
+          if [ -f "$SDK_PATH/System/Library/Frameworks/Carbon.framework/Headers/Carbon.h" ]; then
+            echo "Carbon headers present - keeping Carbon TTS"
+          else
+            echo "Carbon headers missing - disabling Carbon TTS (CI-local patch, no base files committed)"
+            sed -i '' '/#include "ttscarbon.h"/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' '/ttsList.*"carbon".*\]/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' 's/if(ttsName == "carbon")/if(false) \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' 's/tts = new TTSCarbon(parent);/; \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
+            # NOTE: heredoc body + closing EOF must sit at the run-block base
+            # indent (10 spaces) — YAML strips the common indent, and bash
+            # requires the terminator at column 0 while python rejects any
+            # base indent. Do not re-indent this block.
+            python3 - <<'EOF'
+          p = 'utils/rbutilqt/CMakeLists.txt'
+          lines = open(p).read().splitlines(keepends=True)
+          out = []
+          i, removed = 0, False
+          while i < len(lines):
+              if lines[i].strip() == 'if(APPLE)' and not removed:
+                  j, depth = i + 1, 1
+                  while j < len(lines) and depth > 0:
+                      s = lines[j].strip()
+                      if s.startswith('if('):
+                          depth += 1
+                      elif s.startswith('endif('):
+                          depth -= 1
+                      j += 1
+                  if 'ttscarbon' in ''.join(lines[i:j]):
+                      removed = True
+                      i = j
+                      continue
+              out.append(lines[i])
+              i += 1
+          open(p, 'w').write(''.join(out))
+          print('Removed Carbon-only if(APPLE) block' if removed else 'No Carbon if(APPLE) block found, nothing removed')
+          EOF
+            sed -i '' 's/\${FRAMEWORK_CARBON} *//g' utils/rbutilqt/CMakeLists.txt
+            # Fresh installs defaulted to "carbon"; point macOS at the Qt
+            # TextToSpeech engine (AVFoundation, the in-project replacement).
+            # Harmless if Qt speech modules are absent (same fallback as today).
+            sed -i '' '/RbSettings::Tts/ s/"carbon"/"qt"/' utils/rbutilqt/base/rbsettings.cpp
+            # Direct users to pick a working engine when TTS init fails.
+            prompt="Please open the Configuration dialog and select an available TTS engine."
+            for f in utils/rbutilqt/configure.cpp utils/rbutilqt/createvoicewindow.cpp utils/rbutilqt/installtalkwindow.cpp; do
+              sed -i '' "s/You can't use this TTS\./You can't use this TTS. $prompt/" "$f"
+            done
+            sed -i '' "s/Init of TTS engine failed/Init of TTS engine failed. $prompt/" utils/rbutilqt/base/talkgenerator.cpp
+            echo "Verifying Carbon references removed from build files..."
+            if grep -rn -E 'TTSCarbon|ttscarbon|FRAMEWORK_CARBON|ttsList.*carbon' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt; then
+              echo "Carbon references remain after patching"
+              exit 1
+            fi
+            echo "Verifying TTS default migration and configuration prompt..."
+            if ! grep -q -E 'RbSettings::Tts.*"tts".*"qt"' utils/rbutilqt/base/rbsettings.cpp; then
+              echo "macOS TTS default was not migrated from carbon to qt"
+              exit 1
+            fi
+            for f in utils/rbutilqt/configure.cpp utils/rbutilqt/createvoicewindow.cpp utils/rbutilqt/installtalkwindow.cpp utils/rbutilqt/base/talkgenerator.cpp; do
+              if ! grep -q "Please open the Configuration dialog" "$f"; then
+                echo "TTS configuration prompt missing in $f"
+                exit 1
+              fi
+            done
+          fi
 
       - name: CMake Configure (macOS)
         if: runner.os == 'macOS'
@@ -120,7 +188,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="${{ env.QT_PATH }}" \
             -G Ninja
 
-      # No file patching — direct build attempt (Carbon.framework / dmgbuild.stamp patches removed).
+      # Direct build attempt (dmgbuild.stamp patch removed; Carbon excised above if needed).
 
       - name: CMake Build (macOS)
         if: runner.os == 'macOS'
