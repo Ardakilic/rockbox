@@ -152,11 +152,32 @@ jobs:
           print('Removed Carbon-only if(APPLE) block' if removed else 'No Carbon if(APPLE) block found, nothing removed')
           EOF
             sed -i '' 's/\${FRAMEWORK_CARBON} *//g' utils/rbutilqt/CMakeLists.txt
+            # Fresh installs defaulted to "carbon"; point macOS at the Qt
+            # TextToSpeech engine (AVFoundation, the in-project replacement).
+            # Harmless if Qt speech modules are absent (same fallback as today).
+            sed -i '' '/RbSettings::Tts/ s/"carbon"/"qt"/' utils/rbutilqt/base/rbsettings.cpp
+            # Direct users to pick a working engine when TTS init fails.
+            prompt="Please open the Configuration dialog and select an available TTS engine."
+            for f in utils/rbutilqt/configure.cpp utils/rbutilqt/createvoicewindow.cpp utils/rbutilqt/installtalkwindow.cpp; do
+              sed -i '' "s/You can't use this TTS\./You can't use this TTS. $prompt/" "$f"
+            done
+            sed -i '' "s/Init of TTS engine failed/Init of TTS engine failed. $prompt/" utils/rbutilqt/base/talkgenerator.cpp
             echo "Verifying Carbon references removed from build files..."
             if grep -rn -E 'TTSCarbon|ttscarbon|FRAMEWORK_CARBON|ttsList.*carbon' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt; then
               echo "Carbon references remain after patching"
               exit 1
             fi
+            echo "Verifying TTS default migration and configuration prompt..."
+            if ! grep -q -E 'RbSettings::Tts.*"tts".*"qt"' utils/rbutilqt/base/rbsettings.cpp; then
+              echo "macOS TTS default was not migrated from carbon to qt"
+              exit 1
+            fi
+            for f in utils/rbutilqt/configure.cpp utils/rbutilqt/createvoicewindow.cpp utils/rbutilqt/installtalkwindow.cpp utils/rbutilqt/base/talkgenerator.cpp; do
+              if ! grep -q "Please open the Configuration dialog" "$f"; then
+                echo "TTS configuration prompt missing in $f"
+                exit 1
+              fi
+            done
           fi
 
       - name: CMake Configure (macOS)
