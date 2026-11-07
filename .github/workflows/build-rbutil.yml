@@ -457,7 +457,7 @@ jobs:
 
       - name: Get short SHA (release tag)
         id: sha
-        run: echo "short=$(echo \"${{ github.sha }}\" | cut -c1-7)" >> $GITHUB_OUTPUT
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Delete existing release with same tag (re-run safe)
         run: gh release delete "${{ steps.sha.outputs.short }}" --yes --cleanup-tag || true
