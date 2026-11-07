@@ -228,14 +228,40 @@ jobs:
           else
             echo "Carbon headers missing - disabling Carbon TTS (CI-local patch, no base files committed)"
             sed -i '' '/#include "ttscarbon.h"/d' utils/rbutilqt/base/ttsbase.cpp
-            sed -i '' '/ttsList\["carbon"\]/d' utils/rbutilqt/base/ttsbase.cpp
+            sed -i '' '/ttsList.*"carbon".*\]/d' utils/rbutilqt/base/ttsbase.cpp
             sed -i '' 's/if(ttsName == "carbon")/if(false) \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
             sed -i '' 's/tts = new TTSCarbon(parent);/; \/* Carbon removed from macOS 15 SDK *\//' utils/rbutilqt/base/ttsbase.cpp
-            sed -i '' '/ttscarbon\.cpp/d; /ttscarbon\.h/d' utils/rbutilqt/CMakeLists.txt
-            sed -i '' '/only needed for ttscarbon/d' utils/rbutilqt/CMakeLists.txt
+            # NOTE: heredoc body + closing EOF must sit at the run-block base
+            # indent (10 spaces) — YAML strips the common indent, and bash
+            # requires the terminator at column 0 while python rejects any
+            # base indent. Do not re-indent this block.
+            python3 - <<'EOF'
+          p = 'utils/rbutilqt/CMakeLists.txt'
+          lines = open(p).read().splitlines(keepends=True)
+          out = []
+          i, removed = 0, False
+          while i < len(lines):
+              if lines[i].strip() == 'if(APPLE)' and not removed:
+                  j, depth = i + 1, 1
+                  while j < len(lines) and depth > 0:
+                      s = lines[j].strip()
+                      if s.startswith('if('):
+                          depth += 1
+                      elif s.startswith('endif('):
+                          depth -= 1
+                      j += 1
+                  if 'ttscarbon' in ''.join(lines[i:j]):
+                      removed = True
+                      i = j
+                      continue
+              out.append(lines[i])
+              i += 1
+          open(p, 'w').write(''.join(out))
+          print('Removed Carbon-only if(APPLE) block' if removed else 'No Carbon if(APPLE) block found, nothing removed')
+          EOF
             sed -i '' 's/\${FRAMEWORK_CARBON} *//g' utils/rbutilqt/CMakeLists.txt
             echo "Verifying Carbon references removed from build files..."
-            ! grep -rn 'TTSCarbon\|ttscarbon\|FRAMEWORK_CARBON' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt
+            ! grep -rn -E 'TTSCarbon|ttscarbon|FRAMEWORK_CARBON|ttsList.*carbon' utils/rbutilqt/base/ttsbase.cpp utils/rbutilqt/CMakeLists.txt
           fi
 
       - name: CMake Configure (macOS)
