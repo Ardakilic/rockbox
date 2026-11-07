@@ -48,7 +48,7 @@ name: Build Rockbox Utility
 #    ARM64 Qt 6.8.0 packages do not exist (win64_msvc2022_arm64 was added
 #    in 6.11+). We install x64 MinGW Qt and produce x64 binaries. These
 #    run on ARM64 Windows via built-in x64 emulation — transparent and
-#    with good performance. continue-on-error: true as safety net.
+#    with good performance.
 #
 # 6. PER-COMMIT RELEASE STRATEGY
 #    Every successful build makes a NEW release tagged with the head
@@ -155,10 +155,8 @@ jobs:
             arch: arm64
             ext: zip
             label: windows-arm64
-            continue-on-error: true
 
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.continue-on-error || false }}
 
     steps:
       # ── Checkout ──────────────────────────────────────────────────────
@@ -444,7 +442,7 @@ jobs:
         run: |
           echo "Release assets:"
           ls -la release-artifacts/
-          # Expect exactly these filenames (windows-arm64 may be absent if its build failed):
+          # All five assets are required (every build job must succeed for a release):
           #   RockboxUtility-linux-x64.AppImage
           #   RockboxUtility-linux-arm64.AppImage
           #   RockboxUtility-macos-arm64.dmg
@@ -457,7 +455,7 @@ jobs:
 
       - name: Get short SHA (release tag)
         id: sha
-        run: echo "short=$(echo \"${{ github.sha }}\" | cut -c1-7)" >> $GITHUB_OUTPUT
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Delete existing release with same tag (re-run safe)
         run: gh release delete "${{ steps.sha.outputs.short }}" --yes --cleanup-tag || true
@@ -468,6 +466,7 @@ jobs:
         run: |
           TAG="${{ steps.sha.outputs.short }}"
           gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
             --title "Rockbox Utility build $TAG" \
             --notes "Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
 
