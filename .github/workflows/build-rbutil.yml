@@ -50,12 +50,14 @@ name: Build Rockbox Utility
 #    run on ARM64 Windows via built-in x64 emulation — transparent and
 #    with good performance. continue-on-error: true as safety net.
 #
-# 6. RELEASE UPSERT STRATEGY
-#    Delete old release + create new release (not update-in-place).
-#    GitHub Releases API doesn't support atomic asset replacement.
-#    gh release delete latest-builds --yes --cleanup-tag
-#    gh release create latest-builds --title "Latest ..." --prerelease
-#    Fixed tag 'latest-builds' = permanent stable download URL.
+# 6. PER-COMMIT RELEASE STRATEGY
+#    Every successful build makes a NEW release tagged with the head
+#    commit's short SHA (one release per commit, old builds preserved).
+#    Re-runs delete/recreate the same tag (idempotent).
+#    gh release delete <short-sha> --yes --cleanup-tag
+#    gh release create <short-sha> --title "Rockbox Utility build <sha>"
+#    No fixed 'latest-builds' tag (it overwrote history and old builds
+#    were lost).
 #
 # 7. NINJA GENERATOR
 #    Consistently available, faster than Make, simpler than MSBuild.
@@ -418,7 +420,7 @@ jobs:
           if-no-files-found: error
 
   # ═══════════════════════════════════════════════════════════════════════
-  # RELEASE UPSERT — "Latest Rockbox Utility Builds"
+  # PER-COMMIT RELEASE — one new release per successful head commit
   # ═══════════════════════════════════════════════════════════════════════
   release:
     needs: build
@@ -453,26 +455,31 @@ jobs:
         id: date
         run: echo "date=$(date -u +'%Y-%m-%d %H:%M UTC')" >> $GITHUB_OUTPUT
 
-      - name: Delete existing release
-        run: gh release delete latest-builds --yes --cleanup-tag || true
+      - name: Get short SHA (release tag)
+        id: sha
+        run: echo "short=$(echo \"${{ github.sha }}\" | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Delete existing release with same tag (re-run safe)
+        run: gh release delete "${{ steps.sha.outputs.short }}" --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ github.token }}
 
       - name: Create release with binaries
         run: |
-          gh release create latest-builds \
-            --title "Latest Rockbox Utility Builds" \
+          TAG="${{ steps.sha.outputs.short }}"
+          gh release create "$TAG" \
+            --title "Rockbox Utility build $TAG" \
             --notes "Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
 
           **Build Date:** ${{ steps.date.outputs.date }}
 
           | Platform | Architecture | Download |
           |----------|-------------|----------|
-          | Linux | x64 | [RockboxUtility-linux-x64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-x64.AppImage) |
-          | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-linux-arm64.AppImage) |
-          | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-macos-arm64.dmg) |
-          | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-x64.zip) |
-          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/latest-builds/RockboxUtility-windows-arm64.zip) |
+          | Linux | x64 | [RockboxUtility-linux-x64.AppImage](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-linux-x64.AppImage) |
+          | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-linux-arm64.AppImage) |
+          | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-macos-arm64.dmg) |
+          | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-x64.zip) |
+          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-arm64.zip) |
 
           > These are automated CI builds from every push. They are not signed or notarized.
           > For official releases, see the [RockboxUtility wiki](https://www.rockbox.org/wiki/RockboxUtility#Download)." \
