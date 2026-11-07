@@ -467,7 +467,15 @@ jobs:
       - name: Create release with binaries
         run: |
           TAG="${{ steps.sha.outputs.short }}"
+          # windows-arm64 is continue-on-error: omit its row when the asset is absent
+          # (keeps the table free of broken download links). Other rows unchanged.
+          if [ -f release-artifacts/RockboxUtility-windows-arm64.zip ]; then
+            ARM64_ROW="| Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-arm64.zip) |"
+          else
+            ARM64_ROW=""
+          fi
           gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
             --title "Rockbox Utility build $TAG" \
             --notes "Automated CI build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
 
@@ -479,7 +487,7 @@ jobs:
           | Linux | arm64 | [RockboxUtility-linux-arm64.AppImage](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-linux-arm64.AppImage) |
           | macOS | arm64 | [RockboxUtility-macos-arm64.dmg](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-macos-arm64.dmg) |
           | Windows | x64 | [RockboxUtility-windows-x64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-x64.zip) |
-          | Windows | arm64 | [RockboxUtility-windows-arm64.zip](https://github.com/${{ github.repository }}/releases/download/$TAG/RockboxUtility-windows-arm64.zip) |
+          $ARM64_ROW
 
           > These are automated CI builds from every push. They are not signed or notarized.
           > For official releases, see the [RockboxUtility wiki](https://www.rockbox.org/wiki/RockboxUtility#Download)." \
